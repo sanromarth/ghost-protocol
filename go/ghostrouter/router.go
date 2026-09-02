@@ -1,0 +1,428 @@
+package ghostrouter
+
+import (
+	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"log"
+	"sync"
+	"time"
+)
+
+// shortHex returns a safe hex prefix of a byte slice for logging.
+// Prevents panic on slices shorter than 4 bytes.
+func shortHex(b []byte) []byte {
+	if len(b) < 4 {
+		return b
+	}
+	return b[:4]
+}
+
+// BlobList is a gomobile-compatible wrapper for [][]byte.
+// gomobile can't export [][]byte, so we use a helper struct.
+type BlobList struct {
+	blobs [][]byte
+}
+
+// Size returns the number of blobs.
+func (bl *BlobList) Size() int {
+	if bl == nil {
+		return 0
+	}
+	return len(bl.blobs)
+}
+
+// Get returns the blob at index i.
+func (bl *BlobList) Get(i int) []byte {
+	if bl == nil || i < 0 || i >= len(bl.blobs) {
+		return nil
+	}
+	return bl.blobs[i]
+}
+
+// SendResult holds the result of SendMessage for gomobile compatibility.
+type SendResult struct {
+	Blob   []byte // encoded message to send, or nil if queued
+	Status string // "direct" or "queued"
+}
+
+// DeliverHandler is the gomobile-compatible callback interface.
+// Kotlin implements this to receive messages destined for this device.
+type DeliverHandler interface {
+	OnDeliver(dst []byte, payload []byte)
+}
+
+// Router is the gomobile-exported API for spray-and-wait mesh routing.
+type Router struct {
+	store   *MessageStore
+	localID []byte
+
+	handler DeliverHandler
+
+	// In-memory dedup for delivered messages (prevents BLE GATT retry duplicates)
+	deliveredIDs map[string]bool
+
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
+	mu       sync.Mutex
+}
+
+// NewRouter creates a router. Called once from Kotlin on app startup.
+func NewRouter(localID []byte, dbPath string) (*Router, error) {
+	store, err := OpenStore(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open store: %w", err)
+	}
+
+	// Copy localID — gomobile slices are backed by JNI memory
+	// that gets freed after the call returns
+	id := make([]byte, len(localID))
+	copy(id, localID)
+
+	log.Printf("GHOST_ROUTE: NewRouter localID=%x (len=%d)", id[:min(8, len(id))], len(id))
+
+	return &Router{
+		store:        store,
+		localID:      id,
+		deliveredIDs: make(map[string]bool),
+		stopCh:       make(chan struct{}),
+	}, nil
+}
+
+// SetHandler sets the Kotlin callback handler for messages destined for this device.
+func (r *Router) SetHandler(h DeliverHandler) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.handler = h
+}
+
+// Start begins background goroutines for maintenance.
+func (r *Router) Start() {
+	// Expiry janitor: every 60 seconds
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				deleted, err := r.store.DeleteExpired(time.Now().Unix())
+				if err != nil {
+					log.Printf("GHOST_ROUTE: expiry janitor error: %v", err)
+				} else if deleted > 0 {
+					log.Printf("GHOST_ROUTE: expired %d messages", deleted)
+				}
+				if err := r.store.PruneIfNeeded(); err != nil {
+					log.Printf("GHOST_ROUTE: prune error: %v", err)
+				}
+			case <-r.stopCh:
+				return
+			}
+		}
+	}()
+
+	// Peer stale cleaner: every 5 minutes
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				cutoff := time.Now().Add(-24 * time.Hour).UnixMilli()
+				deleted, err := r.store.DeleteStalePeers(cutoff)
+				if err != nil {
+					log.Printf("GHOST_ROUTE: stale peer cleaner error: %v", err)
+				} else if deleted > 0 {
+					log.Printf("GHOST_ROUTE: removed %d stale peers", deleted)
+				}
+			case <-r.stopCh:
+				return
+			}
+		}
+	}()
+
+	log.Printf("GHOST_ROUTE: Router started, localID=%x", r.localID)
+}
+
+// Stop shuts down background goroutines and closes the store.
+func (r *Router) Stop() {
+	r.stopOnce.Do(func() {
+		close(r.stopCh)
+	})
+	r.wg.Wait()
+	if err := r.store.Close(); err != nil {
+		log.Printf("GHOST_ROUTE: error closing store: %v", err)
+	}
+	log.Printf("GHOST_ROUTE: Router stopped")
+}
+
+// computeMessageID generates a unique ID from message fields + random nonce.
+func computeMessageID(src, dst, payload []byte, createdAt int64) []byte {
+	h := sha256.New()
+	h.Write(src)
+	h.Write(dst)
+	h.Write(payload)
+	ts := make([]byte, 8)
+	binary.BigEndian.PutUint64(ts, uint64(createdAt))
+	h.Write(ts)
+	// Random nonce prevents collision when same message sent twice in 1 second
+	nonce := make([]byte, 8)
+	rand.Read(nonce)
+	h.Write(nonce)
+	return h.Sum(nil)
+}
+
+// SendMessage is called by Kotlin when the user taps "Send".
+// Returns a SendResult with the encoded blob (or nil if queued).
+func (r *Router) SendMessage(dst []byte, payload []byte) *SendResult {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Copy parameters — gomobile slices are backed by JNI memory
+	dstCopy := make([]byte, len(dst))
+	copy(dstCopy, dst)
+	payloadCopy := make([]byte, len(payload))
+	copy(payloadCopy, payload)
+
+	now := time.Now().Unix()
+	msgID := computeMessageID(r.localID, dstCopy, payloadCopy, now)
+
+	msg := &Message{
+		ID:              msgID,
+		Src:             r.localID,
+		Dst:             dstCopy,
+		Payload:         payloadCopy,
+		CopiesRemaining: SprayCopies,
+		TTLSeconds:      DefaultTTLSeconds,
+		HopCount:        0,
+		CreatedAt:       now,
+		Status:          StatusPending,
+	}
+
+	if err := r.store.SaveMessage(msg); err != nil {
+		log.Printf("GHOST_ROUTE: error saving message: %v", err)
+		return &SendResult{Status: "error"}
+	}
+
+	// Check if destination peer was recently seen (within 60 seconds)
+	peer, err := r.store.GetPeer(dst)
+	if err == nil && peer != nil {
+		lastSeenSecs := peer.LastSeen / 1000
+		if now-lastSeenSecs < 60 {
+			encoded := EncodeMessage(msg)
+			// Mark as delivered so it's not re-sprayed
+			r.store.UpdateMessageStatus(msg.ID, StatusDelivered)
+			log.Printf("GHOST_ROUTE: SendMessage direct to %x (%d bytes)", shortHex(dst), len(encoded))
+			return &SendResult{Blob: encoded, Status: "direct"}
+		}
+	}
+
+	log.Printf("GHOST_ROUTE: SendMessage queued for spray to %x", shortHex(dst))
+	return &SendResult{Status: "queued"}
+}
+
+// OnPeerDiscovered is called by Kotlin every time BLE discovers a peer.
+// Returns a BlobList of encoded messages to send to this peer.
+func (r *Router) OnPeerDiscovered(peerID []byte, rssi int) *BlobList {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Copy peerID — gomobile slices are backed by JNI memory
+	pid := make([]byte, len(peerID))
+	copy(pid, peerID)
+
+	// 1. Save/update peer
+	existingPeer, _ := r.store.GetPeer(pid)
+	encounterCount := 1
+	if existingPeer != nil {
+		encounterCount = existingPeer.EncounterCount + 1
+	}
+
+	peer := &PeerInfo{
+		ID:             pid,
+		LastSeen:       time.Now().UnixMilli(),
+		LastRSSI:       rssi,
+		EncounterCount: encounterCount,
+	}
+	if err := r.store.SavePeer(peer); err != nil {
+		log.Printf("GHOST_ROUTE: error saving peer: %v", err)
+	}
+
+	var blobs [][]byte
+
+	// 2. Direct deliveries: messages destined for this peer
+	dstMsgs, err := r.store.GetMessagesForDst(pid)
+	if err != nil {
+		log.Printf("GHOST_ROUTE: error getting messages for dst: %v", err)
+	}
+	for _, msg := range dstMsgs {
+		encoded := EncodeMessage(msg)
+		blobs = append(blobs, encoded)
+		r.store.UpdateMessageStatus(msg.ID, StatusDelivered)
+		log.Printf("GHOST_ROUTE: delivering msg %x to final dst %x (%d bytes)",
+			shortHex(msg.ID), shortHex(pid), len(encoded))
+	}
+
+	// 3. Spray copies for messages not destined for this peer
+	pendingMsgs, err := r.store.GetPendingMessages()
+	if err != nil {
+		log.Printf("GHOST_ROUTE: error getting pending messages: %v", err)
+	}
+	for _, msg := range pendingMsgs {
+		if bytes.Equal(msg.Dst, pid) {
+			continue
+		}
+		// Don't spray a message BACK to its sender — wasteful relay loop
+		if bytes.Equal(msg.Src, pid) {
+			continue
+		}
+		if msg.CopiesRemaining <= 1 || msg.HopCount >= MaxHops {
+			continue
+		}
+		if msg.CreatedAt+msg.TTLSeconds < time.Now().Unix() {
+			continue
+		}
+
+		// Binary spray: give half the copies
+		forwardMsg := &Message{
+			ID:              msg.ID,
+			Src:             msg.Src,
+			Dst:             msg.Dst,
+			Payload:         msg.Payload,
+			CopiesRemaining: msg.CopiesRemaining / 2,
+			TTLSeconds:      msg.TTLSeconds,
+			HopCount:        msg.HopCount + 1,
+			CreatedAt:       msg.CreatedAt,
+			Status:          StatusSprayed,
+		}
+
+		encoded := EncodeMessage(forwardMsg)
+		blobs = append(blobs, encoded)
+
+		msg.CopiesRemaining = msg.CopiesRemaining - forwardMsg.CopiesRemaining
+		msg.Status = StatusSprayed
+		r.store.SaveMessage(msg)
+
+		log.Printf("GHOST_ROUTE: sprayed msg %x to carrier %x (gave %d copies, kept %d, hop %d)",
+			shortHex(msg.ID), shortHex(pid), forwardMsg.CopiesRemaining, msg.CopiesRemaining, forwardMsg.HopCount)
+	}
+
+	return &BlobList{blobs: blobs}
+}
+
+// OnMessageReceived is called by Kotlin when ANY BLE data arrives.
+// Returns: "delivered", "forwarded", "dropped: <reason>", or "error: <details>".
+func (r *Router) OnMessageReceived(data []byte) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Copy data — gomobile slices are backed by JNI memory
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+
+	result, err := decodeMessage(dataCopy)
+	if err != nil {
+		log.Printf("GHOST_ROUTE: failed to decode message: %v", err)
+		return fmt.Sprintf("error: %v", err)
+	}
+
+	header := result.Header
+	payload := result.Payload
+
+	// Dedup check — must happen BEFORE deliver to prevent BLE GATT retry duplicates
+	msgIDKey := fmt.Sprintf("%x", header.MessageID)
+	if r.deliveredIDs[msgIDKey] {
+		log.Printf("GHOST_ROUTE: dropping msg %x: already delivered (dedup)", shortHex(header.MessageID))
+		return "dropped: duplicate"
+	}
+	existing, _ := r.store.GetMessage(header.MessageID)
+	if existing != nil {
+		log.Printf("GHOST_ROUTE: dropping msg %x: duplicate in store", shortHex(header.MessageID))
+		return "dropped: duplicate"
+	}
+
+	// Is this message for us?
+	if bytes.Equal(header.Dst, r.localID) {
+		log.Printf("GHOST_ROUTE: message %x is for us! Delivering %d bytes payload",
+			shortHex(header.MessageID), len(payload))
+
+		r.deliveredIDs[msgIDKey] = true
+
+		// Copy handler ref and release lock BEFORE invoking callback
+		// to prevent deadlock if callback calls Router methods
+		handler := r.handler
+		r.mu.Unlock()
+		if handler != nil {
+			handler.OnDeliver(header.Src, payload)
+		}
+		r.mu.Lock() // Re-acquire for deferred unlock
+		return "delivered"
+	}
+
+	// Check hop limit
+	if header.HopCount >= MaxHops {
+		log.Printf("GHOST_ROUTE: dropping msg %x: hop limit %d reached", shortHex(header.MessageID), header.HopCount)
+		return "dropped: hop limit"
+	}
+
+	// Check copies
+	if header.CopiesRemaining <= 0 {
+		log.Printf("GHOST_ROUTE: dropping msg %x: no copies remaining", shortHex(header.MessageID))
+		return "dropped: no copies"
+	}
+
+	// Check TTL
+	if header.CreatedAt+header.TTLSeconds < time.Now().Unix() {
+		log.Printf("GHOST_ROUTE: dropping msg %x: TTL expired", shortHex(header.MessageID))
+		return "dropped: TTL expired"
+	}
+
+	// Forward: save to our store for spraying to future peers
+	msg := &Message{
+		ID:              header.MessageID,
+		Src:             header.Src,
+		Dst:             header.Dst,
+		Payload:         payload,
+		CopiesRemaining: header.CopiesRemaining,
+		TTLSeconds:      header.TTLSeconds,
+		HopCount:        header.HopCount,
+		CreatedAt:       header.CreatedAt,
+		Status:          StatusSprayed,
+	}
+
+	if err := r.store.SaveMessage(msg); err != nil {
+		return fmt.Sprintf("error: failed to save forwarded message: %v", err)
+	}
+
+	log.Printf("GHOST_ROUTE: forwarded msg %x (src=%x dst=%x hop=%d copies=%d)",
+		shortHex(header.MessageID), shortHex(header.Src), shortHex(header.Dst), header.HopCount, header.CopiesRemaining)
+
+	return "forwarded"
+}
+
+// GetStats returns debug stats as a JSON string.
+func (r *Router) GetStats() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	pendingMsgs, _ := r.store.GetPendingMessages()
+	allPeers, _ := r.store.GetAllPeers()
+
+	stats := map[string]interface{}{
+		"localID":         fmt.Sprintf("%x", r.localID[:8]),
+		"messagesStored":  r.store.MessageCount(),
+		"messagesPending": len(pendingMsgs),
+		"peersKnown":      len(allPeers),
+		"peerCount":       r.store.PeerCount(),
+	}
+
+	data, _ := json.Marshal(stats)
+	return string(data)
+}
