@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">GHOST Protocol</string>
+    <string name="mesh_active">Mesh Active</string>
+    <string name="permissions_required">Permissions Required</string>
+    <string name="scanning">Scanning for peers…</string>
+    <string name="notification_channel_name">GHOST Mesh Service</string>
+    <string name="notification_text">Scanning for peers…</string>
+    <string name="grant_permissions">Grant BLE permissions to start mesh</string>
+</resources>
