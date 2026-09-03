@@ -31,6 +31,13 @@ import android.content.ClipData
 import android.widget.Toast
 import java.io.File
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.sp
+import com.ghostprotocol.security.SecurityPosture
+import com.ghostprotocol.security.SecurityPostureManager
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(navController: NavController) {
@@ -38,6 +45,12 @@ fun SettingsScreen(navController: NavController) {
     val scope = rememberCoroutineScope()
     var username by remember { mutableStateOf(IdentityManager.getDisplayName()) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    // v0.3: Security Posture state
+    val postureManager = remember { SecurityPostureManager.getInstance(context) }
+    val currentPosture by postureManager.postureFlow.collectAsState()
+    var pendingPosture by remember { mutableStateOf<SecurityPosture?>(null) }
+    var showPostureConfirmDialog by remember { mutableStateOf(false) }
 
     // v0.2: Power management state
     var lastSnapshot by remember { mutableStateOf<TelemetrySnapshot?>(null) }
@@ -64,6 +77,71 @@ fun SettingsScreen(navController: NavController) {
             val refreshed = telemetry.getReport()
             if (refreshed.isNotEmpty()) lastSnapshot = refreshed.last()
         }
+    }
+
+    if (showPostureConfirmDialog && pendingPosture != null) {
+        val target = pendingPosture!!
+        val isEmergency = target == SecurityPosture.EMERGENCY
+        AlertDialog(
+            onDismissRequest = {
+                showPostureConfirmDialog = false
+                pendingPosture = null
+            },
+            title = {
+                Text(
+                    if (isEmergency) "Enable EMERGENCY MODE?" else "Enable PROTEST MODE?",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        if (isEmergency) {
+                            "Maximum radio duty cycle (300ms scan window/interval) and permanent wakelock. Relay willingness set to 1.0."
+                        } else {
+                            "Enable PROTEST MODE? This increases BLE scan rate (300ms window / 600ms interval) and may drain battery faster."
+                        },
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "Parameters:\n• Scan: ${if (isEmergency) "300ms/300ms" else "300ms/600ms"}\n• Advertise: 100ms HIGH TX\n• Auto-reverts to STEALTH below 20% battery",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        postureManager.setPosture(target)
+                        val intent = Intent(context, com.ghostprotocol.GhostService::class.java).apply {
+                            action = "ACTION_SET_POSTURE"
+                            putExtra("EXTRA_POSTURE", target.name)
+                        }
+                        context.startService(intent)
+                        showPostureConfirmDialog = false
+                        pendingPosture = null
+                        Toast.makeText(context, "Security posture set to ${target.name}", Toast.LENGTH_SHORT).show()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SecurityPostureManager.postureColor(target)
+                    )
+                ) {
+                    Text("Confirm", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showPostureConfirmDialog = false
+                        pendingPosture = null
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 
     Scaffold(
@@ -168,9 +246,71 @@ fun SettingsScreen(navController: NavController) {
                     )
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                // Current mode display — observed live from GhostService
+                // v0.3: Security Posture Section
+                Text("Security Posture", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Governs BLE scan aggressiveness, unknown peer discovery alerts, and relay willingness.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    for (posture in SecurityPosture.entries) {
+                        val isSelected = currentPosture == posture
+                        val chipColor = SecurityPostureManager.postureColor(posture)
+                        Surface(
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .clickable {
+                                    if (posture == SecurityPosture.STEALTH) {
+                                        postureManager.setPosture(SecurityPosture.STEALTH)
+                                        val intent = Intent(context, com.ghostprotocol.GhostService::class.java).apply {
+                                            action = "ACTION_SET_POSTURE"
+                                            putExtra("EXTRA_POSTURE", SecurityPosture.STEALTH.name)
+                                        }
+                                        context.startService(intent)
+                                        Toast.makeText(context, "Security posture: STEALTH", Toast.LENGTH_SHORT).show()
+                                    } else if (posture != currentPosture) {
+                                        pendingPosture = posture
+                                        showPostureConfirmDialog = true
+                                    }
+                                },
+                            shape = RoundedCornerShape(50),
+                            color = if (isSelected) chipColor.copy(alpha = 0.25f) else Color.Transparent,
+                            border = androidx.compose.foundation.BorderStroke(
+                                width = if (isSelected) 2.dp else 1.dp,
+                                color = if (isSelected) chipColor else Color(0xFF3F3F46)
+                            )
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 4.dp, vertical = 12.dp)
+                            ) {
+                                Text(
+                                    text = posture.name,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isSelected) chipColor else MaterialTheme.colorScheme.onSurface,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Current mode & posture display — observed live from GhostService
                 val activePolicy by com.ghostprotocol.GhostService.currentPowerPolicy.collectAsState()
                 val currentMode = activePolicy.mode
                 val modeColor = when (currentMode) {
@@ -182,17 +322,37 @@ fun SettingsScreen(navController: NavController) {
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("Current Mode: ", style = MaterialTheme.typography.bodyLarge)
-                    SuggestionChip(
-                        onClick = {},
-                        label = { Text(currentMode.name, fontWeight = FontWeight.Bold) },
-                        colors = SuggestionChipDefaults.suggestionChipColors(
-                            containerColor = modeColor.copy(alpha = 0.2f),
-                            labelColor = modeColor
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Posture: ", style = MaterialTheme.typography.bodyMedium)
+                        SuggestionChip(
+                            onClick = {},
+                            label = {
+                                Text(
+                                    currentPosture.name,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            },
+                            colors = SuggestionChipDefaults.suggestionChipColors(
+                                containerColor = SecurityPostureManager.postureColor(currentPosture).copy(alpha = 0.2f),
+                                labelColor = SecurityPostureManager.postureColor(currentPosture)
+                            )
                         )
-                    )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Mode: ", style = MaterialTheme.typography.bodyMedium)
+                        SuggestionChip(
+                            onClick = {},
+                            label = { Text(currentMode.name, fontWeight = FontWeight.Bold) },
+                            colors = SuggestionChipDefaults.suggestionChipColors(
+                                containerColor = modeColor.copy(alpha = 0.2f),
+                                labelColor = modeColor
+                            )
+                        )
+                    }
                 }
 
                 if (batteryPercent >= 0) {

@@ -2,6 +2,7 @@ package com.ghostprotocol.power
 
 import android.bluetooth.le.AdvertiseSettings
 import android.content.Context
+import com.ghostprotocol.security.SecurityPosture
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,7 +22,13 @@ data class PowerPolicy(
     val relayWillingness: Float,     // 0.0..1.0 — forwarded to Go router
     val maxBatchSize: Int,           // Max messages per GATT batch
     val wakeLockRequired: Boolean,   // Whether to hold PARTIAL_WAKE_LOCK
-    val mode: PowerMode
+    val mode: PowerMode,
+    val securityPosture: SecurityPosture = SecurityPosture.STEALTH
+)
+
+data class PosturePolicy(
+    val powerPolicy: PowerPolicy,
+    val securityPosture: SecurityPosture
 )
 
 class PowerPolicyEngine(private val context: Context) {
@@ -86,20 +93,66 @@ class PowerPolicyEngine(private val context: Context) {
         peerCount: Int,
         queueSize: Int,
         timeSinceLastEncounterMs: Long,
-        isMoving: Boolean?
+        isMoving: Boolean?,
+        securityPosture: SecurityPosture = SecurityPosture.STEALTH
     ): PowerPolicy {
-        // Check if manual override has expired
-        val override = getOverrideMode()
-        val policy = if (override != null) {
-            policyForMode(override, batteryPercent)
-        } else {
-            computePolicy(
-                batteryPercent, isCharging, screenOn,
-                peerCount, queueSize, timeSinceLastEncounterMs, isMoving
+        val policy = when (securityPosture) {
+            SecurityPosture.PROTEST -> PowerPolicy(
+                scanIntervalMs = 600L,
+                scanWindowMs = 300L,
+                advertiseIntervalMs = 100L,
+                txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_HIGH,
+                relayWillingness = 1.0f,
+                maxBatchSize = 10,
+                wakeLockRequired = true,
+                mode = PowerMode.ACTIVE,
+                securityPosture = SecurityPosture.PROTEST
             )
+            SecurityPosture.EMERGENCY -> PowerPolicy(
+                scanIntervalMs = 300L,
+                scanWindowMs = 300L,
+                advertiseIntervalMs = 100L,
+                txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_HIGH,
+                relayWillingness = 1.0f,
+                maxBatchSize = 10,
+                wakeLockRequired = true,
+                mode = PowerMode.ACTIVE,
+                securityPosture = SecurityPosture.EMERGENCY
+            )
+            SecurityPosture.STEALTH -> {
+                val override = getOverrideMode()
+                if (override != null) {
+                    policyForMode(override, batteryPercent)
+                } else {
+                    computePolicy(
+                        batteryPercent, isCharging, screenOn,
+                        peerCount, queueSize, timeSinceLastEncounterMs, isMoving
+                    )
+                }.copy(securityPosture = SecurityPosture.STEALTH)
+            }
         }
         _currentPolicy.value = policy
         return policy
+    }
+
+    /**
+     * Evaluate inputs and return both PowerPolicy and SecurityPosture via PosturePolicy.
+     */
+    fun evaluate(
+        batteryPercent: Int,
+        isCharging: Boolean,
+        screenOn: Boolean,
+        peerCount: Int,
+        queueSize: Int,
+        timeSinceLastEncounterMs: Long,
+        isMoving: Boolean?,
+        securityPosture: SecurityPosture = SecurityPosture.STEALTH
+    ): PosturePolicy {
+        val policy = updateInputs(
+            batteryPercent, isCharging, screenOn,
+            peerCount, queueSize, timeSinceLastEncounterMs, isMoving, securityPosture
+        )
+        return PosturePolicy(policy, securityPosture)
     }
 
     private fun computePolicy(

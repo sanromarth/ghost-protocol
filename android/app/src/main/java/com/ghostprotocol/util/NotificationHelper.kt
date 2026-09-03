@@ -12,12 +12,69 @@ import android.os.Looper
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import com.ghostprotocol.GhostService
 import com.ghostprotocol.MainActivity
 import com.ghostprotocol.R
+import com.ghostprotocol.power.PowerMode
+import com.ghostprotocol.security.SecurityPosture
 
 object NotificationHelper {
     private const val TAG = "NotificationHelper"
     private const val CHANNEL_VERIFY = "ghost_verify_channel_v2"
+    const val CHANNEL_SERVICE = "ghost_mesh_channel"
+
+    const val ACTION_CYCLE_POSTURE = "ACTION_CYCLE_POSTURE"
+    const val ACTION_CYCLE_MODE = "ACTION_CYCLE_MODE"
+    const val ACTION_STOP_SERVICE = "ACTION_STOP_SERVICE"
+
+    fun buildServiceNotification(
+        context: Context,
+        mode: PowerMode,
+        posture: SecurityPosture,
+        peerCount: Int
+    ): android.app.Notification {
+        val postureIntent = Intent(context, GhostService::class.java).apply {
+            action = ACTION_CYCLE_POSTURE
+        }
+        val posturePendingIntent = PendingIntent.getService(
+            context, 2, postureIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val modeIntent = Intent(context, GhostService::class.java).apply {
+            action = ACTION_CYCLE_MODE
+        }
+        val modePendingIntent = PendingIntent.getService(
+            context, 1, modeIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val quitIntent = Intent(context, GhostService::class.java).apply {
+            action = ACTION_STOP_SERVICE
+        }
+        val quitPendingIntent = PendingIntent.getService(
+            context, 0, quitIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val colorInt = when (posture) {
+            SecurityPosture.STEALTH -> 0xFF6B7280.toInt()
+            SecurityPosture.PROTEST -> 0xFFFFB703.toInt()
+            SecurityPosture.EMERGENCY -> 0xFFEF4444.toInt()
+        }
+
+        return NotificationCompat.Builder(context, CHANNEL_SERVICE)
+            .setContentTitle("GHOST Mesh Active")
+            .setContentText("Posture: ${posture.name} | Mode: ${mode.name} | $peerCount peers")
+            .setSmallIcon(R.drawable.ic_notification)
+            .setColor(colorInt)
+            .setColorized(posture != SecurityPosture.STEALTH)
+            .setOngoing(true)
+            .addAction(android.R.drawable.ic_menu_compass, "Posture: ${posture.name}", posturePendingIntent)
+            .addAction(android.R.drawable.ic_menu_preferences, "Mode: ${mode.name}", modePendingIntent)
+            .addAction(android.R.drawable.ic_delete, "Quit GHOST", quitPendingIntent)
+            .build()
+    }
 
     fun showMutualVerificationNotification(context: Context, contactName: String) {
         try {

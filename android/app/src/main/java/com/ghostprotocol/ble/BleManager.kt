@@ -316,7 +316,7 @@ object BleManager {
         )
 
         val scanMode = when {
-            currentScanIntervalMs <= 500 -> ScanSettings.SCAN_MODE_LOW_LATENCY
+            currentScanIntervalMs <= 600 || currentScanWindowMs >= 300 -> ScanSettings.SCAN_MODE_LOW_LATENCY
             currentScanIntervalMs <= 2000 -> ScanSettings.SCAN_MODE_BALANCED
             else -> ScanSettings.SCAN_MODE_LOW_POWER
         }

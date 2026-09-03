@@ -66,6 +66,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         IdentityManager.init(this)
         GhostTheme.init(this)
+        com.ghostprotocol.security.SecurityPostureManager.getInstance(this)
 
         // Edge-to-edge
         WindowCompat.setDecorFitsSystemWindows(window, false)

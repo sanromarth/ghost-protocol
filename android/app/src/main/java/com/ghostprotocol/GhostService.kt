@@ -36,6 +36,9 @@ import java.security.MessageDigest
 import java.util.UUID
 
 import com.ghostprotocol.router.GhostRouter
+import com.ghostprotocol.security.SecurityPosture
+import com.ghostprotocol.security.SecurityPostureManager
+import com.ghostprotocol.util.NotificationHelper
 
 class GhostService : Service() {
 
@@ -53,8 +56,9 @@ class GhostService : Service() {
     private var ghostRouter: GhostRouter? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // v0.2: Power policy engine and telemetry
+    // v0.2/v0.3: Power policy engine, security posture manager, and telemetry
     private lateinit var powerPolicyEngine: PowerPolicyEngine
+    private lateinit var securityPostureManager: SecurityPostureManager
     private lateinit var batteryTelemetry: BatteryTelemetry
     private var lastEncounterTimeMs: Long = System.currentTimeMillis()
     private var cpuWakeupCount: Int = 0
@@ -103,39 +107,32 @@ class GhostService : Service() {
             Log.e(TAG, "Failed to register bluetoothStateReceiver: ${e.message}")
         }
 
+        // v0.3: Initialize security posture manager with startup auto-revert check
+        securityPostureManager = SecurityPostureManager.getInstance(applicationContext)
+        val initialBattery = getBatteryLevel()
+        securityPostureManager.checkBatteryRevert(initialBattery)
+
         // v0.2: Initialize power policy engine and telemetry
         powerPolicyEngine = PowerPolicyEngine(applicationContext)
         batteryTelemetry = BatteryTelemetry(applicationContext)
 
         createNotificationChannel()
 
-        val quitIntent = Intent(this, GhostService::class.java).apply {
-            action = "ACTION_STOP_SERVICE"
-        }
-        val quitPendingIntent = PendingIntent.getService(
-            this, 0, quitIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val notification = NotificationHelper.buildServiceNotification(
+            this,
+            PowerMode.ECO,
+            securityPostureManager.getPosture(),
+            0
         )
-
-        // v0.2: Add mode cycle action to notification
-        val modeIntent = Intent(this, GhostService::class.java).apply {
-            action = "ACTION_CYCLE_MODE"
-        }
-        val modePendingIntent = PendingIntent.getService(
-            this, 1, modeIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val notification = NotificationCompat.Builder(this, "ghost_mesh_channel")
-            .setContentTitle("GHOST Mesh Active")
-            .setContentText("Scanning for peers...")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setOngoing(true)
-            .addAction(android.R.drawable.ic_menu_compass, "Mode: ECO", modePendingIntent)
-            .addAction(android.R.drawable.ic_delete, "Quit GHOST", quitPendingIntent)
-            .build()
-
         startForeground(1, notification)
+
+        // React to posture changes immediately across the service lifecycle
+        serviceScope.launch {
+            securityPostureManager.postureFlow.collect { posture ->
+                Log.d(TAG, ">>> PostureFlow triggered: ${posture.name} — evaluating policy")
+                evaluateAndApplyPolicy()
+            }
+        }
 
         // Acquire partial wake lock to keep CPU alive for BLE scanning
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -198,9 +195,13 @@ class GhostService : Service() {
      */
     private var lastAppliedPolicy: PowerPolicy? = null
     private var lastMode: PowerMode? = null
+    private var lastPosture: SecurityPosture? = null
 
     private fun evaluateAndApplyPolicy(): PowerPolicy {
         val batteryPercent = getBatteryLevel()
+        securityPostureManager.checkBatteryRevert(batteryPercent)
+        val currentPosture = securityPostureManager.getPosture()
+
         val isCharging = getChargingStatus()
         val screenOn = isScreenOn()
         val peerCount = BleManager.peers.value.size
@@ -214,7 +215,8 @@ class GhostService : Service() {
             peerCount = peerCount,
             queueSize = queueSize,
             timeSinceLastEncounterMs = timeSinceLastEncounter,
-            isMoving = null // Motion sensor not implemented yet
+            isMoving = null, // Motion sensor not implemented yet
+            securityPosture = currentPosture
         )
 
         // Self-healing: ensure BLE radio is actively running if permissions & BT are enabled
@@ -250,23 +252,25 @@ class GhostService : Service() {
 
         lastAppliedPolicy = policy
 
-        // Manage WakeLock
+        // Manage WakeLock: PROTEST / EMERGENCY always hold wakelock; otherwise follow policy.wakeLockRequired
         val wl = wakeLock
+        val shouldHoldWl = policy.securityPosture != SecurityPosture.STEALTH || policy.wakeLockRequired
         if (wl != null) {
-            if (!policy.wakeLockRequired && wl.isHeld) {
+            if (!shouldHoldWl && wl.isHeld) {
                 wl.release()
-                Log.d(TAG, ">>> WakeLock released (mode=${policy.mode})")
-            } else if (policy.wakeLockRequired && !wl.isHeld) {
+                Log.d(TAG, ">>> WakeLock released (mode=${policy.mode}, posture=${policy.securityPosture})")
+            } else if (shouldHoldWl && !wl.isHeld) {
                 wl.acquire(4 * 60 * 60 * 1000L)
-                Log.d(TAG, ">>> WakeLock acquired (mode=${policy.mode})")
+                Log.d(TAG, ">>> WakeLock acquired (mode=${policy.mode}, posture=${policy.securityPosture})")
             }
         }
 
-        // Log mode transitions
-        if (lastMode != policy.mode) {
-            Log.d(TAG, ">>> Power mode: ${policy.mode}, scan: ${policy.scanWindowMs}/${policy.scanIntervalMs}ms, relay: ${policy.relayWillingness}")
+        // Log mode/posture transitions and update notification
+        if (lastMode != policy.mode || lastPosture != policy.securityPosture) {
+            Log.d(TAG, ">>> Posture: ${policy.securityPosture}, Power mode: ${policy.mode}, scan: ${policy.scanWindowMs}/${policy.scanIntervalMs}ms, relay: ${policy.relayWillingness}")
             lastMode = policy.mode
-            updateNotification(policy.mode)
+            lastPosture = policy.securityPosture
+            updateNotification(policy.mode, policy.securityPosture)
         }
     }
 
@@ -359,31 +363,13 @@ class GhostService : Service() {
 
     // ===== NOTIFICATION UPDATES =====
 
-    private fun updateNotification(mode: PowerMode) {
-        val quitIntent = Intent(this, GhostService::class.java).apply {
-            action = "ACTION_STOP_SERVICE"
-        }
-        val quitPendingIntent = PendingIntent.getService(
-            this, 0, quitIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    private fun updateNotification(mode: PowerMode, posture: SecurityPosture = securityPostureManager.getPosture()) {
+        val notification = NotificationHelper.buildServiceNotification(
+            this,
+            mode,
+            posture,
+            BleManager.peers.value.size
         )
-        val modeIntent = Intent(this, GhostService::class.java).apply {
-            action = "ACTION_CYCLE_MODE"
-        }
-        val modePendingIntent = PendingIntent.getService(
-            this, 1, modeIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val notification = NotificationCompat.Builder(this, "ghost_mesh_channel")
-            .setContentTitle("GHOST Mesh Active")
-            .setContentText("Mode: $mode | ${BleManager.peers.value.size} peers")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setOngoing(true)
-            .addAction(android.R.drawable.ic_menu_compass, "Mode: $mode", modePendingIntent)
-            .addAction(android.R.drawable.ic_delete, "Quit GHOST", quitPendingIntent)
-            .build()
-
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(1, notification)
     }
@@ -901,9 +887,31 @@ class GhostService : Service() {
                 Log.d(TAG, ">>> Broadcasting name update to all contacts")
                 broadcastNameUpdate()
             }
-            "ACTION_CYCLE_MODE" -> {
+            NotificationHelper.ACTION_CYCLE_MODE -> {
                 Log.d(TAG, ">>> User tapped cycle mode")
                 cycleMode()
+            }
+            NotificationHelper.ACTION_CYCLE_POSTURE -> {
+                val next = securityPostureManager.cyclePosture()
+                val bat = getBatteryLevel()
+                securityPostureManager.checkBatteryRevert(bat)
+                Log.d(TAG, ">>> User tapped cycle posture -> ${next.name}")
+                evaluateAndApplyPolicy()
+            }
+            "ACTION_SET_POSTURE" -> {
+                val postureStr = intent.getStringExtra("EXTRA_POSTURE")
+                Log.d(TAG, ">>> User requested posture: $postureStr")
+                if (postureStr != null) {
+                    try {
+                        val target = SecurityPosture.valueOf(postureStr)
+                        securityPostureManager.setPosture(target)
+                        val bat = getBatteryLevel()
+                        securityPostureManager.checkBatteryRevert(bat)
+                        evaluateAndApplyPolicy()
+                    } catch (e: Exception) {
+                        Log.e(TAG, ">>> Invalid posture requested: $postureStr")
+                    }
+                }
             }
             "ACTION_SET_POWER_MODE" -> {
                 val modeStr = intent.getStringExtra("EXTRA_MODE")

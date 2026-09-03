@@ -17,6 +17,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ghostprotocol.power.PowerMode
 import com.ghostprotocol.power.PowerPolicy
+import com.ghostprotocol.security.SecurityPosture
+import com.ghostprotocol.security.SecurityPostureManager
 
 /**
  * Tactical Survival HUD Strip:
@@ -40,13 +42,24 @@ fun SurvivalHudStrip(
         PowerMode.DEEP_SLEEP -> Color(0xFFFFB703)
     }
 
+    val posture = powerPolicy.securityPosture
+    val isNonStealth = posture != SecurityPosture.STEALTH
+    val postureColor = SecurityPostureManager.postureColor(posture)
+
+    val statusText = if (isNonStealth) {
+        "${posture.name} | ${powerPolicy.scanWindowMs}ms/${powerPolicy.scanIntervalMs}ms | $peerCount PEERS"
+    } else {
+        "${powerPolicy.mode.name} | ${powerPolicy.scanIntervalMs}ms | $peerCount PEERS"
+    }
+    val statusColor = if (isNonStealth) postureColor else modeColor
+
     Box(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(Color(0xFF0A0A0A))
-            .border(1.dp, Color(0xFF2D6A4F), RoundedCornerShape(6.dp))
+            .border(1.dp, if (isNonStealth) postureColor.copy(alpha = 0.6f) else Color(0xFF2D6A4F), RoundedCornerShape(6.dp))
             .clickable(onClick = onToggle)
             .padding(horizontal = 10.dp, vertical = 6.dp)
     ) {
@@ -63,7 +76,14 @@ fun SurvivalHudStrip(
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
                 )
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "•",
+                    color = Color(0xFF3F3F46),
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = if (batteryPercent >= 0) "$batteryPercent%" else "--%",
                     color = if (batteryPercent < 20) Color(0xFFEF4444) else T.SurvivalPhosphor,
@@ -73,9 +93,10 @@ fun SurvivalHudStrip(
                 )
             }
             Text(
-                text = "${powerPolicy.mode.name} | ${powerPolicy.scanIntervalMs}ms | $peerCount PEERS",
-                color = modeColor,
+                text = statusText,
+                color = statusColor,
                 fontSize = 10.sp,
+                fontWeight = if (isNonStealth) FontWeight.Bold else FontWeight.Normal,
                 fontFamily = FontFamily.Monospace
             )
         }
