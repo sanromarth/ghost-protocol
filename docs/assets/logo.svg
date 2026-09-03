@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="meshLineGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#C77DFF" stop-opacity="0.9"/>
+      <stop offset="50%" stop-color="#9D4EDD" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#7B2CBF" stop-opacity="0.9"/>
+    </linearGradient>
+
+    <linearGradient id="ghostTailGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#E0AAFF" stop-opacity="0.85"/>
+      <stop offset="35%" stop-color="#9D4EDD" stop-opacity="0.75"/>
+      <stop offset="70%" stop-color="#7B2CBF" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#4C1D95" stop-opacity="0.0"/>
+    </linearGradient>
+
+    <filter id="purpleGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <g id="ghost-mesh-icon">
+    <path d="M 256 125
+             C 285 200, 310 260, 275 340
+             C 255 390, 240 420, 262 445
+             C 238 430, 230 380, 235 340
+             C 240 270, 225 200, 256 125 Z"
+          fill="url(#ghostTailGrad)" />
+
+    <line x1="256" y1="125" x2="256" y2="280" stroke="#C77DFF" stroke-width="3" stroke-opacity="0.5" stroke-dasharray="4,4"/>
+    <line x1="120" y1="360" x2="256" y2="280" stroke="#C77DFF" stroke-width="3" stroke-opacity="0.5" stroke-dasharray="4,4"/>
+    <line x1="392" y1="360" x2="256" y2="280" stroke="#C77DFF" stroke-width="3" stroke-opacity="0.5" stroke-dasharray="4,4"/>
+
+    <polygon points="256,125 120,360 392,360"
+             fill="none"
+             stroke="url(#meshLineGrad)"
+             stroke-width="7"
+             stroke-linejoin="round"
+             stroke-linecap="round"
+             filter="url(#purpleGlow)"/>
+
+    <circle cx="256" cy="280" r="14" fill="#7B2CBF" stroke="#E0AAFF" stroke-width="3"/>
+    <circle cx="256" cy="280" r="5" fill="#FFFFFF"/>
+
+    <circle cx="120" cy="360" r="24" fill="#7B2CBF" stroke="#E0AAFF" stroke-width="4.5"/>
+    <circle cx="120" cy="360" r="9" fill="#FFFFFF"/>
+
+    <circle cx="392" cy="360" r="24" fill="#7B2CBF" stroke="#E0AAFF" stroke-width="4.5"/>
+    <circle cx="392" cy="360" r="9" fill="#FFFFFF"/>
+
+    <circle cx="256" cy="125" r="28" fill="#7B2CBF" stroke="#FFFFFF" stroke-width="5"/>
+    <circle cx="256" cy="125" r="11" fill="#FFFFFF"/>
+  </g>
+</svg>
