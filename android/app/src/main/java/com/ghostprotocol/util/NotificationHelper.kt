@@ -248,8 +248,44 @@ object NotificationHelper {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.cancel(3000 + (mac.hashCode() and 0xFFFF))
             manager.cancel(4000 + (mac.hashCode() and 0xFFFF))
+            manager.cancel(5000 + (mac.hashCode() and 0xFFFF))
         } catch (e: Exception) {
             Log.e(TAG, "GHOST_DISCOVERY: Error cancelling discovery notification: ${e.message}", e)
+        }
+    }
+
+    fun showShortCodeFoundNotification(context: Context, name: String, mac: String) {
+        try {
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            ensureDiscoveryChannel(manager)
+
+            val addIntent = Intent(context, GhostService::class.java).apply {
+                action = ACTION_ACCEPT_DISCOVERY
+                putExtra(EXTRA_MAC, mac)
+            }
+            val addPendingIntent = PendingIntent.getService(
+                context,
+                ((mac.hashCode() * 31 + 3) and 0x7FFFFFFF),
+                addIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notificationId = 5000 + (mac.hashCode() and 0xFFFF)
+            val notification = NotificationCompat.Builder(context, CHANNEL_DISCOVERY)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle("Short code match found!")
+                .setContentText("User '$name' responded to your code search.")
+                .setColor(0xFF9D4EDD.toInt())
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
+                .setAutoCancel(true)
+                .addAction(android.R.drawable.ic_input_add, "Add Contact", addPendingIntent)
+                .build()
+
+            manager.notify(notificationId, notification)
+            Log.d(TAG, "GHOST_SHORTCODE: Match notification posted for $mac from $name (id=$notificationId)")
+        } catch (e: Exception) {
+            Log.e(TAG, "GHOST_SHORTCODE: Error showing short code match notification: ${e.message}", e)
         }
     }
 }

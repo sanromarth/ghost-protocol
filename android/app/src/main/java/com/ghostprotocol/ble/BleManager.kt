@@ -22,8 +22,10 @@ import java.util.concurrent.atomic.AtomicLong
 
 import com.ghostprotocol.discovery.DiscoveryManager
 import com.ghostprotocol.discovery.DiscoveryProtocol
+import com.ghostprotocol.discovery.ShortCodeProtocol
 import com.ghostprotocol.router.GhostRouter
 import com.ghostprotocol.security.SecurityPosture
+import com.ghostprotocol.security.ShortCodeManager
 import com.ghostprotocol.security.allowsUnknownPeerNotifications
 
 data class DiscoveredPeer(
@@ -31,7 +33,8 @@ data class DiscoveredPeer(
     val name: String?,
     val rssi: Int,
     val lastSeen: Long,
-    val fingerprint: ByteArray? = null
+    val fingerprint: ByteArray? = null,
+    val shortCodeHint: ByteArray? = null
 )
 
 data class IncomingBleMessage(
@@ -44,11 +47,13 @@ object BleManager {
     val SERVICE_UUID: UUID = UUID.fromString("47484F53-5400-1000-8000-00805F9B34FB")
     val MESSAGE_CHAR_UUID: UUID = UUID.fromString("47484F53-5401-1000-8000-00805F9B34FB")
     private const val MANUFACTURER_ID = 0x00FF
+    private const val MANUFACTURER_ID_SHORTCODE = 0x00FE
 
     // Peer offline detection threshold: 12 seconds without advertising packet = offline
     const val PEER_OFFLINE_TIMEOUT_MS = 12_000L
 
     var discoveryManager: DiscoveryManager? = null
+    var shortCodeManager: ShortCodeManager? = null
     var postureProvider: (() -> SecurityPosture)? = null
 
     private var context: Context? = null
@@ -240,6 +245,20 @@ object BleManager {
         }
     }
 
+    @SuppressLint("MissingPermission")
+    fun updateAdvertiseData() {
+        if (isRunning) {
+            stopAdvTimeTelemetry()
+            try {
+                advertiser?.stopAdvertising(advertiseCallback)
+            } catch (e: Exception) {
+                Log.e(TAG, ">>> stopAdvertising error: ${e.message}")
+            }
+            startAdvertising()
+            Log.d(TAG, ">>> Advertising restarted with updated payload data")
+        }
+    }
+
     // ===== TELEMETRY HELPERS =====
 
     private fun startScanTimeTelemetry() {
@@ -300,6 +319,13 @@ object BleManager {
             scanResponseBuilder.addManufacturerData(MANUFACTURER_ID, fp)
         }
 
+        val posture = postureProvider?.invoke() ?: SecurityPosture.STEALTH
+        if (posture.allowsUnknownPeerNotifications()) {
+            shortCodeManager?.getCurrentFingerprintHint()?.let { hint ->
+                scanResponseBuilder.addManufacturerData(MANUFACTURER_ID_SHORTCODE, hint)
+            }
+        }
+
         advertiser?.startAdvertising(settings, advData, scanResponseBuilder.build(), advertiseCallback)
         startAdvTimeTelemetry()
     }
@@ -348,16 +374,19 @@ object BleManager {
                 val name = try { it.device.name } catch (e: SecurityException) { null }
                 val rssi = it.rssi
                 val fingerprint = it.scanRecord?.getManufacturerSpecificData(MANUFACTURER_ID)
+                val shortCodeHint = it.scanRecord?.getManufacturerSpecificData(MANUFACTURER_ID_SHORTCODE)
 
                 val isNew = !peersMap.containsKey(address)
                 // Preserve existing fingerprint if this scan result lacks scan response data
                 val existingFp = peersMap[address]?.fingerprint
+                val existingHint = peersMap[address]?.shortCodeHint
                 peersMap[address] = DiscoveredPeer(
                     address = address,
                     name = name,
                     rssi = rssi,
                     lastSeen = System.currentTimeMillis(),
-                    fingerprint = fingerprint ?: existingFp
+                    fingerprint = fingerprint ?: existingFp,
+                    shortCodeHint = shortCodeHint ?: existingHint
                 )
                 _peers.value = peersMap.values.toList()
 
@@ -416,19 +445,38 @@ object BleManager {
                 Log.d(TAG, ">>> GATT SERVER: Write request from ${device.address}, ${value.size} bytes, responseNeeded=$responseNeeded")
                 gattBytesRx.addAndGet(value.size.toLong())
 
-                // Demux discovery opcodes (0x10 = DISCOVERY_REQUEST, 0x11 = DISCOVERY_RESPONSE)
-                if (value.isNotEmpty() && value[0] == DiscoveryProtocol.OPCODE_REQUEST) {
-                    if (responseNeeded) {
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                // Demux discovery and short code opcodes (0x10, 0x11, 0x20, 0x21)
+                if (value.isNotEmpty()) {
+                    when (value[0]) {
+                        DiscoveryProtocol.OPCODE_REQUEST -> {
+                            if (responseNeeded) {
+                                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                            }
+                            discoveryManager?.onIncomingRequest(device.address, value)
+                            return
+                        }
+                        DiscoveryProtocol.OPCODE_RESPONSE -> {
+                            if (responseNeeded) {
+                                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                            }
+                            discoveryManager?.onIncomingResponse(device.address, value)
+                            return
+                        }
+                        ShortCodeProtocol.OPCODE_QUERY -> {
+                            if (responseNeeded) {
+                                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                            }
+                            discoveryManager?.onIncomingShortCodeQuery(device.address, value)
+                            return
+                        }
+                        ShortCodeProtocol.OPCODE_RESPONSE -> {
+                            if (responseNeeded) {
+                                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                            }
+                            discoveryManager?.onIncomingShortCodeResponse(device.address, value)
+                            return
+                        }
                     }
-                    discoveryManager?.onIncomingRequest(device.address, value)
-                    return
-                } else if (value.isNotEmpty() && value[0] == DiscoveryProtocol.OPCODE_RESPONSE) {
-                    if (responseNeeded) {
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-                    }
-                    discoveryManager?.onIncomingResponse(device.address, value)
-                    return
                 }
 
                 val emitted = _incomingMessages.tryEmit(IncomingBleMessage(device.address, value))

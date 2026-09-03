@@ -68,5 +68,6 @@ dependencies {
     // Go mesh router (gomobile AAR)
     implementation(files("libs/ghostrouter.aar"))
 
+    testImplementation("junit:junit:4.13.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

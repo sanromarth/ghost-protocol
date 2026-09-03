@@ -179,6 +179,14 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 horizontalAlignment = Alignment.End
             ) {
+                // Add by Short Code
+                SmallFloatingActionButton(
+                    onClick = { navController.navigate("short_code_input") },
+                    containerColor = T.Surface2,
+                    contentColor = T.TextPrimary
+                ) {
+                    Text("#", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                }
                 // Show My QR
                 SmallFloatingActionButton(
                     onClick = { navController.navigate("qr_show") },

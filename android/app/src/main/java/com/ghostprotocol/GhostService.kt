@@ -36,9 +36,11 @@ import java.security.MessageDigest
 import java.util.UUID
 
 import com.ghostprotocol.discovery.DiscoveryManager
+import com.ghostprotocol.discovery.ShortCodeProtocol
 import com.ghostprotocol.router.GhostRouter
 import com.ghostprotocol.security.SecurityPosture
 import com.ghostprotocol.security.SecurityPostureManager
+import com.ghostprotocol.security.ShortCodeManager
 import com.ghostprotocol.util.NotificationHelper
 
 class GhostService : Service() {
@@ -57,10 +59,11 @@ class GhostService : Service() {
     private var ghostRouter: GhostRouter? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // v0.2/v0.3: Power policy engine, security posture manager, discovery manager, and telemetry
+    // v0.2/v0.3: Power policy engine, security posture manager, discovery manager, short code manager, and telemetry
     private lateinit var powerPolicyEngine: PowerPolicyEngine
     private lateinit var securityPostureManager: SecurityPostureManager
     private lateinit var discoveryManager: DiscoveryManager
+    private lateinit var shortCodeManager: ShortCodeManager
     private lateinit var batteryTelemetry: BatteryTelemetry
     private var lastEncounterTimeMs: Long = System.currentTimeMillis()
     private var cpuWakeupCount: Int = 0
@@ -140,10 +143,21 @@ class GhostService : Service() {
         BleManager.discoveryManager = discoveryManager
         BleManager.postureProvider = { securityPostureManager.getPosture() }
 
+        // v0.3: Initialize ShortCodeManager and wire into discovery & BLE
+        shortCodeManager = ShortCodeManager(applicationContext) { securityPostureManager.getPosture() }
+        shortCodeManager.startCountdown(serviceScope)
+        BleManager.shortCodeManager = shortCodeManager
+        discoveryManager.shortCodeManager = shortCodeManager
+        discoveryManager.meshSender = { dstPeerId, payload ->
+            ghostRouter?.sendMessage(dstPeerId, payload)
+        }
+
         // React to posture changes immediately across the service lifecycle
         serviceScope.launch {
             securityPostureManager.postureFlow.collect { posture ->
                 Log.d(TAG, ">>> PostureFlow triggered: ${posture.name} — evaluating policy")
+                shortCodeManager.refreshCode()
+                BleManager.updateAdvertiseData()
                 evaluateAndApplyPolicy()
             }
         }
@@ -393,6 +407,18 @@ class GhostService : Service() {
      * Same decryption logic as direct messages.
      */
     private fun processRoutedPayload(ciphertext: ByteArray) {
+        if (ciphertext.isNotEmpty()) {
+            if (ciphertext[0] == ShortCodeProtocol.OPCODE_MESH_QUERY) {
+                Log.d(TAG, "GHOST_SHORTCODE: Received mesh-routed short code query (0x22)")
+                discoveryManager.onMeshShortCodeQueryReceived(ciphertext)
+                return
+            } else if (ciphertext[0] == ShortCodeProtocol.OPCODE_MESH_RESPONSE) {
+                Log.d(TAG, "GHOST_SHORTCODE: Received mesh-routed short code response (0x23)")
+                discoveryManager.onMeshShortCodeResponseReceived(ciphertext)
+                return
+            }
+        }
+
         val db = GhostDatabase.getInstance(applicationContext)
         val contactDao = db.contactDao()
         val messageDao = db.messageDao()
@@ -706,6 +732,18 @@ class GhostService : Service() {
         contactDao: com.ghostprotocol.data.ContactDao,
         messageDao: com.ghostprotocol.data.MessageDao
     ) {
+        if (data.isNotEmpty()) {
+            if (data[0] == ShortCodeProtocol.OPCODE_MESH_QUERY) {
+                Log.d(TAG, "GHOST_SHORTCODE: Direct received mesh-routed short code query (0x22)")
+                discoveryManager.onMeshShortCodeQueryReceived(data)
+                return
+            } else if (data[0] == ShortCodeProtocol.OPCODE_MESH_RESPONSE) {
+                Log.d(TAG, "GHOST_SHORTCODE: Direct received mesh-routed short code response (0x23)")
+                discoveryManager.onMeshShortCodeResponseReceived(data)
+                return
+            }
+        }
+
         try {
             val myX25519Secret = IdentityManager.getX25519Secret()
             val decrypted = GhostCrypto.decrypt(myX25519Secret, data)
@@ -1052,6 +1090,10 @@ class GhostService : Service() {
         } catch (_: Exception) {}
         BatteryMonitor.stop()
         try {
+            shortCodeManager.cleanup()
+            BleManager.shortCodeManager = null
+            discoveryManager.shortCodeManager = null
+            discoveryManager.meshSender = null
             discoveryManager.cleanup()
             BleManager.discoveryManager = null
             BleManager.postureProvider = null

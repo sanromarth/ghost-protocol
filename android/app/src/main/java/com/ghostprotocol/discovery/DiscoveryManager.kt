@@ -20,6 +20,13 @@ import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
+import com.ghostprotocol.crypto.ShortCode
+import com.ghostprotocol.crypto.ShortCodeGenerator
+import com.ghostprotocol.security.ShortCodeManager
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
 enum class DiscoveryState {
     IDLE,
     REQUEST_SENT,
@@ -28,6 +35,23 @@ enum class DiscoveryState {
     COMPLETED
 }
 
+enum class ShortCodeSearchStatus {
+    IDLE,
+    SEARCHING_NEARBY,
+    SPRAYED_TO_MESH,
+    FOUND,
+    TIMED_OUT,
+    NOT_FOUND
+}
+
+data class ShortCodeSearchResult(
+    val status: ShortCodeSearchStatus,
+    val name: String? = null,
+    val handle: String? = null,
+    val mac: String? = null,
+    val error: String? = null
+)
+
 class DiscoveryManager(
     private val context: Context,
     private val contactDao: ContactDao,
@@ -35,6 +59,15 @@ class DiscoveryManager(
     private val coroutineScope: CoroutineScope,
     private val postureProvider: () -> SecurityPosture
 ) {
+    var shortCodeManager: ShortCodeManager? = null
+    var meshSender: ((dstPeerId: ByteArray, payload: ByteArray) -> Unit)? = null
+
+    private val _shortCodeSearchState = MutableStateFlow(ShortCodeSearchResult(ShortCodeSearchStatus.IDLE))
+    val shortCodeSearchState: StateFlow<ShortCodeSearchResult> = _shortCodeSearchState.asStateFlow()
+
+    private var activeSearchTimeoutJob: Job? = null
+    private var activeTargetCode: ShortCode? = null
+
     private val inFlightStates = ConcurrentHashMap<String, DiscoveryState>()
     private val inFlightRequests = ConcurrentHashMap<String, DiscoveryRequest>()
     private val inFlightTimeouts = ConcurrentHashMap<String, Job>()
@@ -340,7 +373,267 @@ class DiscoveryManager(
         }
     }
 
+    /**
+     * Initiates search for a target ShortCode.
+     * First checks nearby BLE peers. If found locally, queries directly via GATT (0x20).
+     * If not found locally, sprays query over mesh network (0x22).
+     */
+    fun initiateShortCodeSearch(code: ShortCode) {
+        val posture = postureProvider()
+        if (!posture.allowsUnknownPeerNotifications()) {
+            _shortCodeSearchState.value = ShortCodeSearchResult(
+                status = ShortCodeSearchStatus.NOT_FOUND,
+                error = "Short codes disabled in STEALTH mode"
+            )
+            return
+        }
+
+        activeTargetCode = code
+        _shortCodeSearchState.value = ShortCodeSearchResult(ShortCodeSearchStatus.SEARCHING_NEARBY)
+        activeSearchTimeoutJob?.cancel()
+
+        coroutineScope.launch {
+            try {
+                val seed = IdentityManager.getEd25519Seed()
+                val edPub = IdentityManager.getEd25519PubKey()
+                val queryPacket = ShortCodeProtocol.encodeQuery(seed, edPub, code)
+                val targetHint = ShortCodeGenerator.codeToFingerprintHint(code)
+
+                // 1. Check local peers discovered by BleManager
+                val peers = BleManager.peers.value
+                val localMatch = peers.firstOrNull { peer ->
+                    (peer.shortCodeHint != null && peer.shortCodeHint.contentEquals(targetHint)) ||
+                    (peer.fingerprint != null && peer.fingerprint.contentEquals(targetHint))
+                }
+
+                if (localMatch != null) {
+                    Log.d(TAG, "GHOST_SHORTCODE: Found nearby BLE match at ${localMatch.address} for code ${code.toCompactString()}")
+                    BleManager.sendMessage(localMatch.address, queryPacket) { success ->
+                        Log.d(TAG, "GHOST_SHORTCODE: Local GATT query sent to ${localMatch.address}: $success")
+                    }
+                } else {
+                    // 2. Not found locally — broadcast/spray through Go mesh router (0x22)
+                    Log.d(TAG, "GHOST_SHORTCODE: No direct BLE match for ${code.toCompactString()}, spraying to mesh")
+                    _shortCodeSearchState.value = ShortCodeSearchResult(ShortCodeSearchStatus.SPRAYED_TO_MESH)
+
+                    val meshPayload = ByteArray(1 + queryPacket.size)
+                    meshPayload[0] = ShortCodeProtocol.OPCODE_MESH_QUERY
+                    System.arraycopy(queryPacket, 0, meshPayload, 1, queryPacket.size)
+
+                    val specialDst = MessageDigest.getInstance("SHA-256")
+                        .digest("GHOST_SHORTCODE:${code.toCompactString()}".toByteArray(Charsets.UTF_8))
+
+                    meshSender?.invoke(specialDst, meshPayload)
+                }
+
+                // 3. 30-second search timeout
+                activeSearchTimeoutJob = coroutineScope.launch {
+                    delay(30_000L)
+                    if (_shortCodeSearchState.value.status == ShortCodeSearchStatus.SEARCHING_NEARBY ||
+                        _shortCodeSearchState.value.status == ShortCodeSearchStatus.SPRAYED_TO_MESH
+                    ) {
+                        Log.d(TAG, "GHOST_SHORTCODE: Search timed out for ${code.toCompactString()}")
+                        _shortCodeSearchState.value = ShortCodeSearchResult(
+                            status = ShortCodeSearchStatus.TIMED_OUT,
+                            error = "No response. The user may be out of range or the code may have expired."
+                        )
+                        activeTargetCode = null
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "GHOST_SHORTCODE: Error initiating search: ${e.message}", e)
+                _shortCodeSearchState.value = ShortCodeSearchResult(
+                    status = ShortCodeSearchStatus.NOT_FOUND,
+                    error = e.message
+                )
+            }
+        }
+    }
+
+    /**
+     * Direct GATT query received (opcode 0x20).
+     */
+    fun onIncomingShortCodeQuery(mac: String, data: ByteArray) {
+        if (!postureProvider().allowsUnknownPeerNotifications()) return
+
+        val query = ShortCodeProtocol.decodeQuery(data) ?: run {
+            Log.w(TAG, "GHOST_SHORTCODE: Failed to decode query from $mac")
+            return
+        }
+
+        if (!ShortCodeProtocol.verifyQuery(query)) {
+            Log.e(TAG, "GHOST_SHORTCODE: Invalid signature on query from $mac")
+            return
+        }
+
+        val myCode = shortCodeManager?.currentCode?.value
+        if (myCode == null ||
+            myCode.epochDay != query.epochDay ||
+            !myCode.word1.equals(query.word1, ignoreCase = true) ||
+            !myCode.word2.equals(query.word2, ignoreCase = true) ||
+            !myCode.word3.equals(query.word3, ignoreCase = true) ||
+            myCode.number != query.number
+        ) {
+            // Anti-probing invariant: silent drop!
+            Log.d(TAG, "GHOST_SHORTCODE: Query from $mac did not match current code. Silently dropping.")
+            return
+        }
+
+        Log.d(TAG, "GHOST_SHORTCODE: Query matched our code! Sending FOUND response to $mac")
+        coroutineScope.launch {
+            try {
+                val seed = IdentityManager.getEd25519Seed()
+                val edPub = IdentityManager.getEd25519PubKey()
+                val xPub = IdentityManager.getX25519PubKey()
+                val myName = IdentityManager.getDisplayName()
+
+                val respPacket = ShortCodeProtocol.encodeResponse(
+                    status = ShortCodeProtocol.STATUS_FOUND,
+                    ed25519Seed = seed,
+                    ed25519Pub = edPub,
+                    x25519Pub = xPub,
+                    name = myName
+                )
+
+                BleManager.sendMessage(mac, respPacket) { success ->
+                    Log.d(TAG, "GHOST_SHORTCODE: Response delivered to $mac: $success")
+                }
+
+                val requesterHash = MessageDigest.getInstance("SHA-256").digest(query.requesterEd25519Pub)
+                val requesterHandle = requesterHash.take(8).joinToString("") { "%02x".format(it) }.take(6)
+                finalizeContact("Peer #$requesterHandle", query.requesterEd25519Pub, query.requesterEd25519Pub, mac)
+            } catch (e: Exception) {
+                Log.e(TAG, "GHOST_SHORTCODE: Error responding to query: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * Direct GATT response received (opcode 0x21).
+     */
+    fun onIncomingShortCodeResponse(mac: String, data: ByteArray) {
+        if (!postureProvider().allowsUnknownPeerNotifications()) return
+
+        val response = ShortCodeProtocol.decodeResponse(data) ?: run {
+            Log.w(TAG, "GHOST_SHORTCODE: Failed to decode response from $mac")
+            return
+        }
+
+        if (!ShortCodeProtocol.verifyResponse(response)) {
+            Log.e(TAG, "GHOST_SHORTCODE: Invalid signature on response from $mac")
+            return
+        }
+
+        if (response.status == ShortCodeProtocol.STATUS_FOUND) {
+            activeSearchTimeoutJob?.cancel()
+            val hash = MessageDigest.getInstance("SHA-256").digest(response.responderEd25519Pub)
+            val handle = hash.take(8).joinToString("") { "%02x".format(it) }.take(6)
+
+            _shortCodeSearchState.value = ShortCodeSearchResult(
+                status = ShortCodeSearchStatus.FOUND,
+                name = response.name,
+                handle = handle,
+                mac = mac
+            )
+
+            finalizeContact(response.name, response.responderEd25519Pub, response.responderX25519Pub, mac)
+            NotificationHelper.showShortCodeFoundNotification(context, response.name, mac)
+        }
+    }
+
+    /**
+     * Mesh-routed query received (opcode 0x22).
+     */
+    fun onMeshShortCodeQueryReceived(data: ByteArray) {
+        if (!postureProvider().allowsUnknownPeerNotifications()) return
+        if (data.size < 2 || data[0] != ShortCodeProtocol.OPCODE_MESH_QUERY) return
+
+        val queryData = data.copyOfRange(1, data.size)
+        val query = ShortCodeProtocol.decodeQuery(queryData) ?: return
+        if (!ShortCodeProtocol.verifyQuery(query)) return
+
+        val myCode = shortCodeManager?.currentCode?.value
+        if (myCode == null ||
+            myCode.epochDay != query.epochDay ||
+            !myCode.word1.equals(query.word1, ignoreCase = true) ||
+            !myCode.word2.equals(query.word2, ignoreCase = true) ||
+            !myCode.word3.equals(query.word3, ignoreCase = true) ||
+            myCode.number != query.number
+        ) {
+            // Anti-probing: silent drop
+            return
+        }
+
+        Log.d(TAG, "GHOST_SHORTCODE: Mesh query matched our code! Sending mesh response back to requester.")
+        coroutineScope.launch {
+            try {
+                val seed = IdentityManager.getEd25519Seed()
+                val edPub = IdentityManager.getEd25519PubKey()
+                val xPub = IdentityManager.getX25519PubKey()
+                val myName = IdentityManager.getDisplayName()
+
+                val respPacket = ShortCodeProtocol.encodeResponse(
+                    status = ShortCodeProtocol.STATUS_FOUND,
+                    ed25519Seed = seed,
+                    ed25519Pub = edPub,
+                    x25519Pub = xPub,
+                    name = myName
+                )
+
+                val meshResp = ByteArray(1 + respPacket.size)
+                meshResp[0] = ShortCodeProtocol.OPCODE_MESH_RESPONSE
+                System.arraycopy(respPacket, 0, meshResp, 1, respPacket.size)
+
+                // Requester peerId is 32-byte SHA-256(requesterEd25519Pub)
+                val requesterPeerId = MessageDigest.getInstance("SHA-256").digest(query.requesterEd25519Pub)
+                meshSender?.invoke(requesterPeerId, meshResp)
+
+                val requesterHandle = requesterPeerId.take(8).joinToString("") { "%02x".format(it) }.take(6)
+                finalizeContact("Mesh Peer #$requesterHandle", query.requesterEd25519Pub, query.requesterEd25519Pub, "MESH")
+            } catch (e: Exception) {
+                Log.e(TAG, "GHOST_SHORTCODE: Error responding to mesh query: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * Mesh-routed response received (opcode 0x23).
+     */
+    fun onMeshShortCodeResponseReceived(data: ByteArray) {
+        if (!postureProvider().allowsUnknownPeerNotifications()) return
+        if (data.size < 2 || data[0] != ShortCodeProtocol.OPCODE_MESH_RESPONSE) return
+
+        val respData = data.copyOfRange(1, data.size)
+        val response = ShortCodeProtocol.decodeResponse(respData) ?: return
+        if (!ShortCodeProtocol.verifyResponse(response)) return
+
+        if (response.status == ShortCodeProtocol.STATUS_FOUND) {
+            activeSearchTimeoutJob?.cancel()
+            val hash = MessageDigest.getInstance("SHA-256").digest(response.responderEd25519Pub)
+            val handle = hash.take(8).joinToString("") { "%02x".format(it) }.take(6)
+
+            _shortCodeSearchState.value = ShortCodeSearchResult(
+                status = ShortCodeSearchStatus.FOUND,
+                name = response.name,
+                handle = handle,
+                mac = "MESH"
+            )
+
+            finalizeContact(response.name, response.responderEd25519Pub, response.responderX25519Pub, "MESH")
+            NotificationHelper.showShortCodeFoundNotification(context, response.name, "MESH")
+        }
+    }
+
+    fun clearShortCodeSearch() {
+        activeSearchTimeoutJob?.cancel()
+        activeSearchTimeoutJob = null
+        activeTargetCode = null
+        _shortCodeSearchState.value = ShortCodeSearchResult(ShortCodeSearchStatus.IDLE)
+    }
+
     fun cleanup() {
+        activeSearchTimeoutJob?.cancel()
+        clearShortCodeSearch()
         for ((_, job) in inFlightTimeouts) {
             job.cancel()
         }

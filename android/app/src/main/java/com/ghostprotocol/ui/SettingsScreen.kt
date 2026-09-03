@@ -31,6 +31,8 @@ import android.content.ClipData
 import android.widget.Toast
 import java.io.File
 
+import com.ghostprotocol.ble.BleManager
+import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.text.font.FontFamily
@@ -348,6 +350,82 @@ fun SettingsScreen(navController: NavController) {
                             checkedTrackColor = GhostTheme.Purple.copy(alpha = 0.3f)
                         )
                     )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Phase 3: Allow Short Code Resolution (read-only switch mirroring posture)
+                val isShortCodeActive = currentPosture != SecurityPosture.STEALTH
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            if (!isShortCodeActive) {
+                                Toast.makeText(context, "Switch to PROTEST mode to enable short codes.", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Short code resolution active (${currentPosture.name} mode)", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Allow Short Code Resolution", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            text = if (isShortCodeActive) "Active in ${currentPosture.name} posture" else "Disabled in STEALTH posture",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (isShortCodeActive) SecurityPostureManager.postureColor(currentPosture) else MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    Switch(
+                        checked = isShortCodeActive,
+                        onCheckedChange = {
+                            if (!isShortCodeActive) {
+                                Toast.makeText(context, "Switch to PROTEST mode to enable short codes.", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Short code resolution active (${currentPosture.name} mode)", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = GhostTheme.Purple,
+                            checkedTrackColor = GhostTheme.Purple.copy(alpha = 0.3f)
+                        )
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Phase 3: My Short Code Card
+                val shortCodeManager = BleManager.shortCodeManager
+                val currentShortCode = shortCodeManager?.currentCode?.collectAsState()?.value
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = GhostTheme.Surface1),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, GhostTheme.Surface3),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { navController.navigate("short_code") }
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("My Short Code", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = GhostTheme.TextPrimary)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = if (isShortCodeActive) (currentShortCode?.toDisplayString() ?: "Generating...") else "Disabled in STEALTH mode",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = if (isShortCodeActive) GhostTheme.Purple else GhostTheme.TextSecondary
+                            )
+                        }
+                        Icon(Icons.Default.QrCode, contentDescription = "View Code", tint = GhostTheme.TextSecondary, modifier = Modifier.size(20.dp))
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))

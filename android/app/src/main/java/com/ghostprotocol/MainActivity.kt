@@ -28,6 +28,8 @@ import com.ghostprotocol.ui.QRScanScreen
 import com.ghostprotocol.ui.QRShowScreen
 import com.ghostprotocol.ui.UsernameSetupScreen
 import com.ghostprotocol.ui.SettingsScreen
+import com.ghostprotocol.ui.ShortCodeScreen
+import com.ghostprotocol.ui.ShortCodeInputScreen
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
@@ -120,6 +122,8 @@ class MainActivity : ComponentActivity() {
                             composable("qr_show") { QRShowScreen(navController) }
                             composable("qr_scan") { QRScanScreen(navController) }
                             composable("settings") { SettingsScreen(navController) }
+                            composable("short_code") { ShortCodeScreen(navController) }
+                            composable("short_code_input") { ShortCodeInputScreen(navController) }
                         }
                     }
                 }
