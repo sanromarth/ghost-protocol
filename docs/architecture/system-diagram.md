@@ -119,27 +119,49 @@ sequenceDiagram
 
 | Component | Language | Size | Purpose |
 |---|---|---|---|
-| `android/app/` | Kotlin | ~5,200 LOC | UI (Compose), BLE (GATT + batching), PowerPolicyEngine, BatteryTelemetry, Room DB (v4) |
+| `android/app/` | Kotlin | ~5,600 LOC | UI (Compose), BLE (GATT + batching), PowerPolicyEngine, BatteryTelemetry, Room DB (v6), Mutual QR |
 | `rust/ghost-crypto/` | Rust | ~300 LOC | Ed25519 sign/verify, X25519 DH, AES-256-GCM encrypt/decrypt |
 | `go/ghostrouter/` | Go | ~950 LOC | Spray-and-Wait routing, batch serializer, relay willingness gating, BoltDB store |
 
 ## 7. Key Data Structures
 
-| Structure | Format |
-|---|---|
-| Identity blob | `ed25519_seed(32) + ed25519_pub(32) + x25519_secret(32) + x25519_pub(32)` = 128 bytes |
-| QR payload | `GHOST:<Base64(ed25519_pub + x25519_pub + name_utf8)>` |
-| Contact ID | `SHA-256(ed25519_pub).take(8).toHex()` → 16-char hex string |
-| BLE fingerprint | `SHA-256(ed25519_pub).take(4)` → 4 bytes in scan response |
-| Router peer ID | `SHA-256(ed25519_pub)` → 32 raw bytes |
-| Message ID | `computeMessageID(payload + random_nonce)` → collision-resistant |
-| Encrypted payload | `[ed25519_pub(32)] [username\0message] [ed25519_sig(64)]` → encrypted with X25519+AES-256-GCM |
-| Single wire format | `[4B headerLen][JSON RoutingHeader][encrypted payload]` |
-| Batch wire format | `[1B count][4B len1][msg1][4B len2][msg2]...` |
-| Telemetry record | `TelemetryEntity` in Room (`telemetry_snapshots`): 15 metrics, 7-day retention |
+| Structure | Format | Notes |
+|---|---|---|
+| Identity blob | `ed25519_seed(32) + ed25519_pub(32) + x25519_secret(32) + x25519_pub(32)` = 128 bytes | Generated once at first launch |
+| QR payload | `GHOST:<Base64(ed25519_pub + x25519_pub + name_utf8)>` | In-person zero-TOFU exchange |
+| Contact ID | `SHA-256(ed25519_pub).take(8).toHex()` → 16-char hex string | Stable unique identifier |
+| BLE fingerprint | `SHA-256(ed25519_pub).take(4)` → 4 bytes in primary `advData` | Enables passive scanning & survives MAC rotation |
+| Router peer ID | `SHA-256(ed25519_pub)` → 32 raw bytes | Used by Go router in BoltDB |
+| Message ID | `computeMessageID(payload + random_nonce)` | Prevents collisions & replay |
+| Encrypted payload | `[ed25519_pub(32)] [name\0body OR name\0REPLY\0qSender\0qText\0body] [ed25519_sig(64)]` | Encrypted with X25519 + AES-256-GCM |
+| Single wire format | `[4B headerLen][JSON RoutingHeader][encrypted payload]` | Backward-compatible direct & routed envelope |
+| Batch wire format | `[1B count][4B len1][msg1][4B len2][msg2]...` | Single GATT connection sequential writes |
+| Telemetry record | `TelemetryEntity` in Room (`telemetry_snapshots`): 15 metrics | 48-hour rolling retention with CSV export |
 
-## 8. Deployment Model
-- Single debug APK (~46 MB, includes arm64 + x86_64 native libs)
-- **No Google Play Services** dependencies
-- Can be sideloaded via USB, file share, or direct APK transfer
-- Target: Android 8.0+ (API 26), 1GB RAM, no internet required
+## 8. Reciprocal QR Verification Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Device A (Scanner)
+    participant B as Device B (Showing QR)
+    
+    A->>B: Scans Device B's cryptographic QR code
+    A->>A: Haptic buzz + Saves B as Contact (isVerified=true)
+    A->>A: Room DB: Inserts "* verified B *"
+    A->>A: Automatically opens QRShowScreen (displays A's QR)
+    A->>B: Transmits signed verification packet over BLE
+    B->>A: Scans Device A's QR code (now on screen)
+    B->>B: Room DB: Inserts "* verified A *" & "* mutual verification with A *"
+    B->>B: High-priority notification: "Mutual verification: You and A verified each other"
+    B->>A: Transmits mutual verification ACK over BLE
+    A->>A: Room DB: Inserts "* mutual verification with B *"
+    A->>A: High-priority notification: "Mutual verification: You and B verified each other"
+    Note over A,B: Both devices display green 🔒 ✔ security badge
+```
+
+## 9. Deployment Model
+- Single debug APK (~46 MB, includes arm64-v8a + x86_64 native libraries)
+- **Zero Google Play Services** dependencies (pure AOSP compatible)
+- Sideloadable via USB, local ad-hoc transfer, or microSD
+- Target: Android 8.0+ (API 26), 1GB RAM minimum, zero internet connectivity required

@@ -99,3 +99,19 @@ stateDiagram-v2
     Carrying --> Delivering : Target found
     Delivering --> [*]
 ```
+
+## 13. Physical Power & Batching Extensions (v0.2.0)
+
+### 13.1 Relay Willingness Load Shedding
+Nodes scale mesh forwarding acceptance via a dynamic relay willingness parameter $w \in [0.0, 1.0]$ controlled by battery state:
+- When battery level drops below 20% or node enters sleep modes, $w \to 0.0$.
+- Incoming transit messages are rejected prior to persistent store allocation.
+- Direct delivery to local identity is preserved unconditionally.
+
+### 13.2 Single-Session GATT Batching
+When a node encounters a peer with multiple queued messages in the delay-tolerant store:
+- Encodes a composite payload: `[1B count][4B len1][msg1][4B len2][msg2]...`
+- Transmits all pending packets over a single GATT connection using sequential MTU 512 writes, eliminating connection setup overhead.
+
+### 13.3 Delay-Tolerant Re-encounter Delivery
+Sprayed or delayed messages sitting in local persistent storage are proactively flushed upon peer discovery. Upon verified delivery, messages are promoted from sprayed to delivered status.

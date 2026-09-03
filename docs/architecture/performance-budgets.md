@@ -22,7 +22,7 @@
 
 | Component | RAM (est.) | Storage | CPU Idle | CPU Active |
 |---|---|---|---|---|
-| Kotlin App + BLE + Power | ~45 MB | ~2 MB (Room DB v4 + telemetry) | 1–3% (mode-dependent) | 15% (GATT writes) |
+| Kotlin App + BLE + Power | ~45 MB | ~2 MB (Room DB v6 + telemetry) | 1–3% (mode-dependent) | 15% (GATT writes) |
 | Rust crypto (.so) | ~2 MB | ~300 KB per ABI | 0% | 5% (encrypt/sign) |
 | Go router + BoltDB | ~5 MB | Up to 50 MB (message store) | 1% (janitor) | 10% (routing) |
 | **Total** | **~52 MB** | **~53 MB max** | **~1–4%** | **~30%** |

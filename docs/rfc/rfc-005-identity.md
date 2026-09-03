@@ -97,3 +97,14 @@ stateDiagram-v2
     RecoveryComplete --> Active
     Active --> Revoked
 ```
+
+## 12. Contact Discovery & Exchange Addendum
+
+### 12.1 Out-of-Band Key Exchange (Zero-TOFU)
+- **Primary Mechanism:** In-person cryptographic QR scan.
+- **Wire Format:** `GHOST:<Base64(Ed25519PublicKey(32) || X25519PublicKey(32) || DisplayName(UTF-8))>`
+- **Reciprocal Verification:** Scanning peer QR automatically transitions local device to show QR code for reciprocal return scan. Both devices exchange signed wire packets over BLE, entering `MutuallyVerified` state (`🔒 ✔`).
+
+### 12.2 Protest Mode Discovery (v0.3 Specification)
+- **Nearby One-Tap Consent:** Discovered BLE 4-byte fingerprints trigger high-priority prompts. One-tap approval initiates mutual GATT key bundle exchange in <3 seconds without cameras.
+- **24-Hour Rotating Short Codes:** `BIP-39[Seed(4)] || Nonce` derived from `HMAC-SHA256(PrivKey, EpochDay)` for verbal, sign, or radio exchange. Resolved via local mesh encounter cache.

@@ -1,41 +1,41 @@
 # GHOST Protocol Threat Model
 
-> **Version:** v0.1.5 — honest assessment of what v0.1.5 protects against following a 10-round audit fixing 67 vulnerabilities.
-> For the full aspirational threat model, see the original RFCs.
+> **Version:** v0.2.0 — honest engineering assessment of protections and attack surfaces.
+> Evaluated following v0.1.5 stability audit and v0.2.0 power/routing hardening.
 
 ## 1. Threat Actors
 
-| Actor | Can Attack v0.1.5? | Details |
+| Actor | Can Attack v0.2.0? | Details |
 |---|---|---|
 | **Passive eavesdropper** | ✅ Mitigated | AES-256-GCM + ephemeral X25519 per message |
+| **Relay flood / Battery drainer** | ✅ Mitigated | `PowerPolicyEngine` throttles radio; `relayWillingness` drops transit packets under 20% battery |
+| **Replay attacker** | ✅ Mitigated | 60s sliding window deduplicates on ciphertext (unique ephemeral nonces) |
 | **Local adversary (physical access)** | ⚠ Partially mitigated | Keys in app-private storage. No PIN/biometric lock. |
-| **Network adversary (malicious relay)** | ⚠ Partially mitigated | Can't read/forge messages. Can delay or drop them. |
-| **State-level adversary** | ❌ Not mitigated | BLE traffic analysis reveals device locations and social graphs |
-| **Quantum adversary** | ❌ Not mitigated | X25519/Ed25519 are classically secure only |
+| **Network adversary (malicious relay)** | ⚠ Partially mitigated | Cannot read/forge messages. Can drop transit blobs. |
+| **State-level adversary** | ❌ Not mitigated | BLE traffic analysis reveals device proximity and cluster graphs |
+| **Quantum adversary** | ❌ Not mitigated | Classical X25519/Ed25519 only |
 
-## 2. What v0.1.5 Actually Protects
+## 2. What v0.2.0 Actually Protects
 
-### ✅ Tier 1: Resilience (PROTECTED via v0.1.5 Hardening)
-- **Memory Safety:** Rust unwrap panics across FFI boundary mitigated.
-- **Concurrency:** Go router deadlocks and BoltDB lock contention fixed.
-- **Collision Resistance:** Message ID generation includes random nonces to prevent collisions.
-- **Resource Exhaustion:** GATT client connection timeout (10s) and GATT server buffer overflow fixes prevent DoS.
+### ✅ Tier 1: Resilience & Battery Protection
+- **Memory Safety:** Rust FFI panics across boundaries eliminated.
+- **Concurrency:** Go router deadlocks and BoltDB lock contention resolved.
+- **Denial-of-Sleep / Battery Exhaustion:** Malicious peers flooding relay requests cannot drain a dying phone. At battery < 20%, `relayWillingness` drops to 0.0, discarding transit blobs before disk write.
+- **Connection Storms:** Concurrent GATT connections serialized to prevent Android error 133.
+- **Collision & Replay Resistance:** Message hashing uses ciphertext (including ephemeral nonce).
 
+### ✅ Tier 1: Confidentiality
+- **E2E encryption:** Every message encrypted with X25519 ECDH + AES-256-GCM.
+- **Forward secrecy:** Fresh ephemeral X25519 keypair per message.
+- **Relay blindness:** Relay nodes handle opaque binary blobs. Content, sender identity, and recipient public keys are encrypted.
 
-### ✅ Tier 1: Confidentiality (PROTECTED)
-- **E2E encryption:** Every message encrypted with X25519 ECDH + AES-256-GCM
-- **Forward secrecy:** Fresh ephemeral X25519 keypair per message. Compromising long-term key doesn't reveal past messages
-- **Relay blindness:** Relay nodes carry encrypted blobs. They cannot read the content or verify the sender
+### ✅ Tier 1: Integrity & Authentication
+- **Ed25519 digital signatures:** Authenticates sender and prevents payload tampering.
+- **AEAD authentication tag:** Bit-flip attacks detected by GCM.
+- **Zero-TOFU QR Exchange:** Cryptographic identity exchanged in-person.
+- **Reciprocal Mutual Verification:** BitChat-style two-way verification confirms both parties scanned each other before granting verified badge `🔒 ✔`.
 
-### ✅ Tier 1: Integrity (PROTECTED)
-- **Ed25519 signatures:** Every message signed with sender's Ed25519 key. Tampering is detectable
-- **AES-GCM authentication tag:** Bit-flip attacks detected by the AEAD construction
-
-### ✅ Tier 1: Authentication (PROTECTED)
-- **QR code key exchange:** Cryptographic identity verified in-person. No TOFU (trust-on-first-use) vulnerability
-- **Sender verification:** Receiver verifies Ed25519 signature against stored public key. Spoofing requires stealing the private key
-
-## 3. What v0.1.5 Does NOT Protect
+## 3. What v0.2.0 Does NOT Protect
 
 ### ⚠ Tier 2: Metadata (PARTIALLY EXPOSED)
 | Metadata | Status | Why |
@@ -93,9 +93,11 @@
 
 | Version | Addition | Threat Mitigated |
 |---|---|---|
-| v0.2 | Delivery receipts + encounter-aware routing | Relay manipulation (partial) |
-| v0.3 | Fixed-size packets + cover traffic | Traffic analysis (partial) |
-| v0.3 | WiFi Direct transport fallback | RF jamming (partial) |
-| v1.0 | ML-KEM-1024 + ML-DSA-65 hybrid PQ crypto | Quantum adversary |
-| v1.0 | Shamir (5,3) identity recovery | Key loss |
-| v1.0 | Biometric seed + dead-man switch | Device seizure |
+| **v0.2.0 ✓** | PowerPolicyEngine + relay willingness gate | Battery exhaustion / Denial-of-Sleep attacks |
+| **v0.2.0 ✓** | Reciprocal mutual QR verification + ciphertext dedup | Replay attacks & unilateral contact impersonation |
+| **v0.2.5** | Contact Introductions (signed vouching envelope) | Sybil / unknown peer injection |
+| **v0.3.0** | Protest Mode (1-tap consent discovery + 24h short codes) | Physical capture during high-friction setup |
+| **v0.3.5** | Fixed-size packet padding + cover traffic | Traffic analysis & packet length correlation |
+| **v0.4.0** | WiFi Direct multi-transport fallback | BLE 2.4GHz RF jamming (partial) |
+| **v1.0.0** | ML-KEM-1024 + ML-DSA-65 hybrid PQ crypto | Store-now-decrypt-later quantum adversary |
+| **v1.0.0** | Shamir (5,3) identity recovery + biometric seed | Key loss & device seizure |

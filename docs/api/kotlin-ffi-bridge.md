@@ -100,14 +100,14 @@ interface DeliverHandler {
 
 ## 4. Data Format (Not Protobuf)
 
-v0.1.5 uses raw `ByteArray` for all FFI calls. No Protobuf `.proto` files exist yet.
+v0.2.0 uses raw `ByteArray` for all FFI calls. No Protobuf `.proto` files exist yet.
 
 | Data | Format | Size |
 |---|---|---|
 | Identity | Raw bytes | 128 bytes |
 | QR payload | `GHOST:<Base64(ed25519_pub + x25519_pub + name)>` | Variable |
 | Encrypted message | `[ephemeral_pub(32)][nonce(12)][ciphertext][tag(16)]` | Variable |
-| Signed payload | `[ed25519_pub(32)][username\0message][ed25519_sig(64)]` | Variable |
+| Signed payload | `[ed25519_pub(32)][name\0msg OR name\0REPLY\0qSender\0qText\0msg][ed25519_sig(64)]` | Variable |
 | Routing header | JSON (not Protobuf) | Variable |
 | Batched messages (v0.2.0) | `[1B count][4B len1][msg1][4B len2][msg2]...` | Variable |
 
@@ -129,7 +129,7 @@ While crypto and routing reside in Rust/Go, power management and radio control l
 
 ### BatteryTelemetry
 - Records 15 metrics to SQLite (`telemetry_snapshots`) every 60 seconds.
-- Auto-prunes snapshots older than 7 days.
+- Auto-prunes snapshots older than 48 hours.
 - CSV export for on-device battery drain analysis.
 
 ## 6. Thread Safety

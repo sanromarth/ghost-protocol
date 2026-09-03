@@ -4,25 +4,49 @@ All notable changes to the GHOST Protocol project are documented in this file.
 
 ---
 
-## v0.2.0 — Battery-Aware Mesh Power (2026-09-03)
+## [v0.2.0] — 2026-09-03
+
+Major release focusing on physical battery efficiency, delay-tolerant mesh delivery, and reciprocal contact verification. Verified across two physical Android devices over BLE.
 
 ### Added
-- Message batching: multiple messages per GATT session (4× energy reduction)
-- PowerPolicyEngine: centralized battery-aware policy layer
-- Battery telemetry: real-time energy/delivery measurement
-- Operating modes: ACTIVE, ECO, CRITICAL, DEEP_SLEEP
-- Relay willingness: battery-scaled forwarding (preserves mesh while protecting dying phones)
-- Settings UI: power management panel with mode override and CSV export
+- **PowerPolicyEngine:** Centralized state engine evaluating 5 device inputs every 30 seconds (battery level, charging state, screen status, peer count, pending queue depth, encounter recency). Automatically transitions across 4 operating modes:
+  - `ACTIVE`: 500ms scan / 100ms adv, high TX power, full relay willingness (1.0). For charging or high-density routing.
+  - `ECO`: 2000ms scan / 500ms adv, medium TX power, battery-proportional relay willingness (0.3–1.0). Default walking state.
+  - `CRITICAL`: 60s scan / 1000ms adv, low TX power, relay disabled (0.0), Partial WakeLock released. For battery < 20%.
+  - `DEEP_SLEEP`: 300s scan / 2000ms adv, low TX power, relay disabled (0.0), Partial WakeLock released. For stationary overnight nodes (>30m without encounters).
+- **Single-Session GATT Message Batching:**
+  - Wire format: `[1B count][4B len1][msg1][4B len2][msg2]...`
+  - Bundles pending queue into a single connection, MTU 512 negotiation, and service discovery cycle. Chained sequential GATT writes eliminate connection thrashing and reduce active radio on-time by ~70%.
+- **Relay Willingness Gating:** Thread-safe dynamic gate in Go router (`SetRelayWillingness`). When willingness is 0.0, forwarded transit messages are dropped prior to BoltDB storage, preserving scarce flash write cycles and battery life on dying nodes.
+- **Battery & Mesh Telemetry:**
+  - SQLite snapshot logging (`telemetry_snapshots`) recording 15 runtime metrics every 60s (temperatures, GATT connection counters, TX/RX byte counts, CPU wakeups, scan runtimes).
+  - 48-hour rolling retention pruning.
+  - One-tap CSV export via Android `FileProvider` and system share sheet.
+- **BitChat-Style Reciprocal QR Verification:**
+  - Scanning a peer's QR code triggers haptic feedback and automatically opens `QRShowScreen` on the scanner's device so the peer can scan back without touching navigation buttons.
+  - Wire-level verification handshake: transmits signed verification payload over BLE upon scan.
+  - When reciprocal scan or handshake completes, inserts `* mutual verification with <name> *` system event, fires high-priority Android system notification (`Mutual verification: You and <name> verified each other`), and renders green `🔒 ✔` security badges in the chat header and contact list.
+  - In-chat system events rendered as centered, monospace log lines with bracketed timestamps (`[HH:mm:ss]`).
+- **Quoted Reply Envelope Protocol:** Wire format parses `\u0000REPLY\u0000<quotedSender>\u0000<quotedText>\u0000<bodyText>`, persisting `replyToSender` and `replyToText` in Room DB. Backward-compatible with non-quoted messages.
 
-### Changed
-- BLE scan/advertise now adapt dynamically based on battery, peer density, and queue size
-- WakeLock management: released in low-power modes, respects Android Doze
-- Telemetry retention: 7 days for trend analysis
+### Fixed
+- **DTN Store-and-Forward Re-encounter Delivery:**
+  - Fixed dead-code guard in `GhostService.kt` where `if (ghostRouter == null)` prevented Room database delayed-queue processing.
+  - Added atomic Room query `getSprayedOrPendingForContact(contactId)` (`status IN (0, 4)`).
+  - Upon BLE peer discovery, automatically pulls delayed messages from Room DB, encrypts with fresh ephemeral keys, sequentially delivers them via `suspendCancellableCoroutine` over GATT, and promotes status from `STATUS_SPRAYED` (4) to `STATUS_SENT` (1), updating UI icon from 📡 to `✓`.
+- **Message Deduplication:** Replaced plaintext-based hashing with ciphertext-hash deduplication (includes ephemeral nonce) over a 60-second sliding window, preventing legitimate identical repeated messages from being dropped.
+- **Peer Online Status Flapping:** Added 120-second timeout window and 4-byte primary advertising packet fallback to prevent contact status flapping during Android BLE MAC address rotation.
+- **GATT 133 Connection Storms:** Fixed concurrent GATT connection attempts to identical MAC addresses via coroutine mutex serialization.
+- **Service Notification Actions:** Added notification action buttons to cycle power policies directly from the Android notification shade.
 
-### Technical
-- Go: `EncodeBatch`/`DecodeBatch` wire format, `SetRelayWillingness` API
-- Kotlin: `PowerPolicyEngine`, `BatteryTelemetry`, `sendBatch` in BleManager
-- 15/15 Go tests passing, Gradle build successful
+### Database & Schema Migrations
+- Bumped Room database schema from version 3 → 4 (`TelemetryEntity` table added).
+- Bumped Room database schema from version 4 → 5 (`replyToSender` and `replyToText` columns added to `messages`).
+- Bumped Room database schema from version 5 → 6 (`isVerified` column added to `contacts` with `MIGRATION_5_6`).
+
+### Testing & Verification
+- 15/15 Go tests passing (<0.05s) covering store, serializer, routing, batch encoding roundtrip, and relay willingness gating.
+- Physical dual-device hardware verification completed on Android API 34.
 
 ---
 
