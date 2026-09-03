@@ -3,8 +3,10 @@ package com.ghostprotocol.ui
 import android.app.Application
 import android.util.Base64
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -71,6 +73,15 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
     }
     val T = GhostTheme
 
+    val context = LocalContext.current
+    val currentPowerPolicy by com.ghostprotocol.GhostService.currentPowerPolicy.collectAsStateWithLifecycle()
+    val batteryPercent = remember {
+        val batteryIntent = context.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+        val level = batteryIntent?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batteryIntent?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100) ?: 100
+        if (scale > 0) (level * 100) / scale else -1
+    }
+
     Scaffold(
         containerColor = T.Surface0,
         topBar = {
@@ -92,10 +103,44 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                             color = T.TextPrimary,
                             letterSpacing = 2.sp
                         )
-                        IconButton(onClick = { navController.navigate("settings") }) {
-                            Icon(Icons.Default.Settings, "Settings", tint = T.TextSecondary)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            // Survival HUD 1-Tap Toggle
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (T.isSurvivalHudEnabled) T.SurvivalPhosphor.copy(alpha = 0.2f) else T.Surface2)
+                                    .border(
+                                        1.dp,
+                                        if (T.isSurvivalHudEnabled) T.SurvivalPhosphor else Color.Transparent,
+                                        RoundedCornerShape(12.dp)
+                                    )
+                                    .clickable {
+                                        T.toggleSurvivalHud(context)
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                            ) {
+                                Text(
+                                    text = if (T.isSurvivalHudEnabled) "⚡ HUD ON" else "⚡ HUD",
+                                    color = if (T.isSurvivalHudEnabled) T.SurvivalPhosphor else T.TextSecondary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(6.dp))
+                            IconButton(onClick = { navController.navigate("settings") }) {
+                                Icon(Icons.Default.Settings, "Settings", tint = T.TextSecondary)
+                            }
                         }
                     }
+
+                    // Persistent Tactical Survival HUD strip when enabled
+                    SurvivalHudStrip(
+                        batteryPercent = batteryPercent,
+                        powerPolicy = currentPowerPolicy,
+                        peerCount = blePeers.size,
+                        onToggle = { T.toggleSurvivalHud(context) }
+                    )
 
                     Spacer(modifier = Modifier.height(8.dp))
 
@@ -239,9 +284,9 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                         .background(T.Surface0)
                 ) {
                     items(filtered) { contact ->
-                        val isOnline = blePeers.any { peer ->
+                        val matchedPeer = blePeers.find { peer ->
                             val matchesAddress = contact.bleAddress != null && peer.address == contact.bleAddress
-                            val matchesFp = peer.fingerprint != null && contact.ed25519PubKey != null && try {
+                            val matchesFp = peer.fingerprint != null && try {
                                 val contactFp = java.security.MessageDigest.getInstance("SHA-256")
                                     .digest(Base64.decode(contact.ed25519PubKey, Base64.NO_WRAP))
                                     .copyOfRange(0, 4)
@@ -249,8 +294,10 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                             } catch (_: Exception) { false }
                             (matchesAddress || matchesFp) && (currentTime - peer.lastSeen < 120_000L)
                         }
+                        val isOnline = matchedPeer != null
                         PremiumContactRow(
                             contact = contact,
+                            matchedPeer = matchedPeer,
                             isOnline = isOnline,
                             onClick = { navController.navigate("chat/${contact.id}") { launchSingleTop = true } }
                         )
@@ -262,12 +309,16 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
 }
 
 @Composable
-fun PremiumContactRow(contact: Contact, isOnline: Boolean, onClick: () -> Unit) {
+fun PremiumContactRow(
+    contact: Contact,
+    matchedPeer: com.ghostprotocol.ble.DiscoveredPeer?,
+    isOnline: Boolean,
+    onClick: () -> Unit
+) {
     val T = GhostTheme
-    val avatar = AvatarGenerator.fromPubkey(
-        Base64.decode(contact.ed25519PubKey, Base64.NO_WRAP),
-        contact.name
-    )
+    val ed25519Bytes = remember(contact.ed25519PubKey) {
+        try { Base64.decode(contact.ed25519PubKey, Base64.NO_WRAP) } catch (_: Exception) { null }
+    }
 
     Row(
         modifier = Modifier
@@ -276,61 +327,43 @@ fun PremiumContactRow(contact: Contact, isOnline: Boolean, onClick: () -> Unit) 
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Avatar with online indicator
-        Box(modifier = Modifier.size(T.AvatarMedium)) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(avatar.backgroundColor, CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = avatar.initial.toString(),
-                    color = avatar.textColor,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 20.sp
-                )
-            }
-            // Online/offline dot with ring
-            if (contact.bleAddress != null) {
-                Box(
-                    modifier = Modifier
-                        .size(14.dp)
-                        .align(Alignment.BottomEnd)
-                        .background(T.Surface0, CircleShape)
-                        .padding(2.dp)
-                        .background(
-                            if (isOnline) T.Online else T.TextMuted,
-                            CircleShape
-                        )
-                )
-            }
-        }
+        // Signature Ghost Avatar with Ethereal Ring (animated violet for verified, slate for unverified)
+        GhostAvatar(
+            pubkey = ed25519Bytes,
+            name = contact.name,
+            size = T.AvatarMedium,
+            isMutuallyVerified = contact.isVerified
+        )
 
         Spacer(modifier = Modifier.width(14.dp))
 
         Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = contact.name,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = T.TextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(3.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = contact.name,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = T.TextPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false)
+                    text = "#${contact.id.take(6)}",
+                    fontSize = 12.sp,
+                    color = T.TextMuted,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                )
+                // Live Radio RF Proximity Wave
+                RadioProximityWave(
+                    rssi = matchedPeer?.rssi,
+                    isOnline = isOnline
                 )
             }
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = "#${contact.id.take(6)}",
-                fontSize = 12.sp,
-                color = T.TextMuted
-            )
         }
     }
 }

@@ -139,8 +139,36 @@ fun SettingsScreen(navController: NavController) {
 
             // ===== v0.2: POWER MANAGEMENT SECTION =====
             item {
-                Text("Power Management", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Power & Display", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(8.dp))
+
+                // Tactical Survival HUD Mode Toggle
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
+                        Text("Tactical Survival HUD", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "True #000000 OLED black, high-contrast monochrome, zero animations to maximize battery in survival/protest scenarios.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = GhostTheme.TextSecondary
+                        )
+                    }
+                    Switch(
+                        checked = GhostTheme.isSurvivalHudEnabled,
+                        onCheckedChange = { GhostTheme.setSurvivalHud(context, it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = GhostTheme.SurvivalPhosphor,
+                            checkedTrackColor = GhostTheme.SurvivalPhosphor.copy(alpha = 0.3f)
+                        )
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
 
                 // Current mode display — observed live from GhostService
                 val activePolicy by com.ghostprotocol.GhostService.currentPowerPolicy.collectAsState()

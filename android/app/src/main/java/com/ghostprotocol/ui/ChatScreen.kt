@@ -327,54 +327,34 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                         )
                     }
 
-                    val avatar = contact?.let {
-                        AvatarGenerator.fromPubkey(Base64.decode(it.ed25519PubKey, Base64.NO_WRAP), it.name)
-                    }
-
-                    // Avatar with online indicator — tap for contact info
-                    if (avatar != null) {
-                        Box(
-                            modifier = Modifier
-                                .size(42.dp)
-                                .clickable { showContactInfo = true }
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(T.AvatarSmall)
-                                    .align(Alignment.Center)
-                                    .background(avatar.backgroundColor, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = avatar.initial.toString(),
-                                    color = avatar.textColor,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 16.sp
-                                )
-                            }
-                            // Online dot — check actual BLE proximity with 120s hysteresis & fingerprint fallback
-                            val blePeers by BleManager.peers.collectAsState()
-                            val isOnline = contact != null && blePeers.any { peer ->
-                                val matchesAddress = contact?.bleAddress != null && peer.address == contact?.bleAddress
-                                val matchesFp = peer.fingerprint != null && contact?.ed25519PubKey != null && try {
-                                    val contactFp = java.security.MessageDigest.getInstance("SHA-256")
-                                        .digest(Base64.decode(contact!!.ed25519PubKey, Base64.NO_WRAP))
-                                        .copyOfRange(0, 4)
-                                    peer.fingerprint.contentEquals(contactFp)
-                                } catch (_: Exception) { false }
-                                (matchesAddress || matchesFp) && (currentTime - peer.lastSeen < 120_000L)
-                            }
-                            if (isOnline) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(10.dp)
-                                        .align(Alignment.BottomEnd)
-                                        .background(T.Surface0, CircleShape)
-                                        .padding(1.5.dp)
-                                        .background(T.Online, CircleShape)
-                                )
-                            }
+                    val isMutuallyVerified = messages.any { it.content.startsWith("* mutual verification with ") } || contact?.isVerified == true
+                    val blePeers by BleManager.peers.collectAsState()
+                    val matchedPeer = contact?.let { c ->
+                        blePeers.find { peer ->
+                            val matchesAddress = c.bleAddress != null && peer.address == c.bleAddress
+                            val matchesFp = peer.fingerprint != null && try {
+                                val contactFp = java.security.MessageDigest.getInstance("SHA-256")
+                                    .digest(Base64.decode(c.ed25519PubKey, Base64.NO_WRAP))
+                                    .copyOfRange(0, 4)
+                                peer.fingerprint.contentEquals(contactFp)
+                            } catch (_: Exception) { false }
+                            (matchesAddress || matchesFp) && (currentTime - peer.lastSeen < 120_000L)
                         }
+                    }
+                    val isOnline = matchedPeer != null
+
+                    // Avatar with Ghost Aura / Ethereal Ring — tap for contact info
+                    if (contact != null) {
+                        val ed25519Bytes = remember(contact!!.ed25519PubKey) {
+                            try { Base64.decode(contact!!.ed25519PubKey, Base64.NO_WRAP) } catch (_: Exception) { null }
+                        }
+                        GhostAvatar(
+                            pubkey = ed25519Bytes,
+                            name = contact!!.name,
+                            size = T.AvatarSmall,
+                            isMutuallyVerified = isMutuallyVerified,
+                            onClick = { showContactInfo = true }
+                        )
                         Spacer(modifier = Modifier.width(12.dp))
                     }
 
@@ -385,11 +365,19 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                             fontSize = 18.sp,
                             color = T.TextPrimary
                         )
-                        Text(
-                            text = "#" + (contact?.id?.take(6) ?: ""),
-                            fontSize = 12.sp,
-                            color = T.TextSecondary
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "#" + (contact?.id?.take(6) ?: ""),
+                                fontSize = 12.sp,
+                                color = T.TextSecondary,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            RadioProximityWave(
+                                rssi = matchedPeer?.rssi,
+                                isOnline = isOnline
+                            )
+                        }
                     }
                 }
             }
@@ -772,17 +760,38 @@ fun PremiumMessageBubble(
         launch { alphaAnim.animateTo(1f, tween(180)) }
     }
 
-    // Pulse animation for SPRAYED
+    val isSprayed = message.status == MessageEntity.STATUS_SPRAYED
+    val isSurvival = T.isSurvivalHudEnabled
+
+    // Pulse animation for SPRAYED (disabled in Survival HUD mode to conserve battery)
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.25f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(750, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulseScale"
-    )
+    val pulseScale by if (!isSurvival && isSprayed) {
+        infiniteTransition.animateFloat(
+            initialValue = 1f,
+            targetValue = 1.25f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(750, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "pulseScale"
+        )
+    } else {
+        remember { mutableStateOf(1f) }
+    }
+
+    val shimmerAlpha by if (!isSurvival && isSprayed) {
+        infiniteTransition.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 0.95f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(1200, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "shimmerAlpha"
+        )
+    } else {
+        remember { mutableStateOf(0.6f) }
+    }
 
     // Grouped bubble shape — tighter corners for middle messages
     val bubbleShape = getBubbleShape(isSent, groupPosition)
@@ -791,6 +800,28 @@ fun PremiumMessageBubble(
     val topPad = when (groupPosition) {
         GroupPosition.SINGLE, GroupPosition.FIRST -> 4.dp
         else -> 1.dp
+    }
+
+    // Delay-Tolerant Sprayed physics border: pulsing ethereal neon shimmer while in transit
+    val bubbleBorder = when {
+        isSprayed && isSurvival -> Modifier.border(1.dp, T.SurvivalAmber, bubbleShape)
+        isSprayed -> Modifier.border(
+            1.5.dp,
+            Brush.linearGradient(
+                listOf(
+                    T.NeonViolet1.copy(alpha = shimmerAlpha),
+                    T.NeonViolet2.copy(alpha = shimmerAlpha),
+                    T.NeonViolet3.copy(alpha = shimmerAlpha)
+                )
+            ),
+            bubbleShape
+        )
+        isSent && message.status == MessageEntity.STATUS_DELIVERED -> Modifier.border(
+            1.dp,
+            T.Online.copy(alpha = 0.35f),
+            bubbleShape
+        )
+        else -> Modifier
     }
 
     Column(
@@ -810,6 +841,7 @@ fun PremiumMessageBubble(
             ) {
                 Box(
                     modifier = Modifier
+                        .then(bubbleBorder)
                         .then(
                             if (isSent) {
                                 Modifier.background(

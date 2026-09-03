@@ -65,6 +65,9 @@ object NotificationHelper {
             manager.notify(contactName.hashCode() + 2000, notification)
             Log.d(TAG, ">>> Notification successfully posted to NotificationManager for '$contactName'")
 
+            // Physical Dual-Pulse Heartbeat Haptic Confirmation
+            HapticHelper.triggerHeartbeat(context)
+
             // In-app visual toast fallback to guarantee the user sees it even if notifications are silenced
             Handler(Looper.getMainLooper()).post {
                 Toast.makeText(

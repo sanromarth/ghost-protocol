@@ -43,9 +43,6 @@ fun QRShowScreen(navController: NavController) {
         val hash = MessageDigest.getInstance("SHA-256").digest(pubKey)
         "#" + hash.take(3).joinToString("") { "%02x".format(it) }
     }
-    val avatar = remember {
-        AvatarGenerator.fromPubkey(IdentityManager.getEd25519PubKey(), displayName)
-    }
 
     // Pulsing glow animation for QR border
     val infiniteTransition = rememberInfiniteTransition(label = "qr_glow")
@@ -90,25 +87,13 @@ fun QRShowScreen(navController: NavController) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            // Avatar
-            Box(
-                modifier = Modifier.size(80.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(avatar.backgroundColor, CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = avatar.initial.toString(),
-                        color = avatar.textColor,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 32.sp
-                    )
-                }
-            }
+            // Avatar with signature Ghost Ethereal Ring
+            GhostAvatar(
+                pubkey = IdentityManager.getEd25519PubKey(),
+                name = displayName,
+                size = 80.dp,
+                isMutuallyVerified = true
+            )
 
             Spacer(modifier = Modifier.height(12.dp))
 

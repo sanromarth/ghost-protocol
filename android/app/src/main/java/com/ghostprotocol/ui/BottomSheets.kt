@@ -113,24 +113,15 @@ fun ContactInfoBottomSheet(
                 .padding(bottom = 32.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Large avatar
-            val avatar = AvatarGenerator.fromPubkey(
-                Base64.decode(contact.ed25519PubKey, Base64.NO_WRAP),
-                contact.name
-            )
-            Box(
-                modifier = Modifier
-                    .size(T.AvatarLarge)
-                    .background(avatar.backgroundColor, CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = avatar.initial.toString(),
-                    color = avatar.textColor,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 32.sp
-                )
+            val ed25519Bytes = remember(contact.ed25519PubKey) {
+                try { Base64.decode(contact.ed25519PubKey, Base64.NO_WRAP) } catch (_: Exception) { null }
             }
+            GhostAvatar(
+                pubkey = ed25519Bytes,
+                name = contact.name,
+                size = T.AvatarLarge,
+                isMutuallyVerified = contact.isVerified
+            )
 
             Spacer(modifier = Modifier.height(12.dp))
 

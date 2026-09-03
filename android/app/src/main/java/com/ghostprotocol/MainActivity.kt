@@ -65,6 +65,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         IdentityManager.init(this)
+        GhostTheme.init(this)
 
         // Edge-to-edge
         WindowCompat.setDecorFitsSystemWindows(window, false)
