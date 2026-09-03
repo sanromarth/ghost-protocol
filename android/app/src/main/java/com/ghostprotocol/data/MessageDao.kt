@@ -28,4 +28,7 @@ interface MessageDao {
 
     @Query("SELECT * FROM messages WHERE status = :status AND isOutgoing = 1")
     suspend fun getPendingMessages(status: Int = 0): List<MessageEntity>
+
+    @Query("SELECT * FROM messages WHERE contactId = :contactId AND isOutgoing = 1 AND status IN (0, 4) ORDER BY timestamp ASC")
+    suspend fun getSprayedOrPendingForContact(contactId: String): List<MessageEntity>
 }
