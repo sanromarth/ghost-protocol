@@ -653,8 +653,8 @@ object BleManager {
         })
         gattRef = gatt
 
-        // Timeout: 10s + 5s per additional message
-        val timeoutMs = 10_000L + (chunks.size - 1) * 5_000L
+        // Timeout: 10s + 5s per additional message, capped at 45s max
+        val timeoutMs = minOf(45_000L, 10_000L + (chunks.size - 1) * 5_000L)
         timeoutHandler.postDelayed({
             if (resultDelivered.get()) return@postDelayed
             Log.e(TAG, ">>> BATCH CLIENT: Timeout after ${timeoutMs}ms to $macAddress")
