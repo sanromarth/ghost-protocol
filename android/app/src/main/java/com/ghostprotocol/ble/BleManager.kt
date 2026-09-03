@@ -98,17 +98,29 @@ object BleManager {
         }
     }
 
+    fun isBleRunning(): Boolean {
+        return isRunning && adapter?.isEnabled == true && scanner != null && advertiser != null
+    }
+
     @SuppressLint("MissingPermission")
     fun start(ctx: Context) {
-        if (isRunning || !hasPermissions(ctx)) return
+        if (!hasPermissions(ctx)) return
         context = ctx.applicationContext
         bluetoothManager = context?.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         adapter = bluetoothManager?.adapter
 
         if (adapter == null || !adapter!!.isEnabled) {
             Log.e(TAG, "Bluetooth not available or not enabled")
+            isRunning = false
             return
         }
+
+        // Avoid duplicate start if already healthy
+        if (isRunning && scanner != null && advertiser != null && gattServer != null) {
+            return
+        }
+
+        stop() // Reset any previous dead state
 
         advertiser = adapter?.bluetoothLeAdvertiser
         scanner = adapter?.bluetoothLeScanner
@@ -118,22 +130,24 @@ object BleManager {
         startScanning()
 
         isRunning = true
-        Log.d(TAG, "BleManager started")
+        Log.d(TAG, "BleManager started successfully")
     }
 
     @SuppressLint("MissingPermission")
     fun stop() {
-        if (!isRunning) return
+        if (!isRunning && scanner == null && advertiser == null && gattServer == null) return
 
         // Accumulate final scan/advertise time
         stopScanTimeTelemetry()
         stopAdvTimeTelemetry()
 
-        advertiser?.stopAdvertising(advertiseCallback)
-        scanner?.stopScan(scanCallback)
+        try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: Exception) {}
+        try { scanner?.stopScan(scanCallback) } catch (_: Exception) {}
 
-        gattServer?.close()
+        try { gattServer?.close() } catch (_: Exception) {}
         gattServer = null
+        scanner = null
+        advertiser = null
 
         isRunning = false
         Log.d(TAG, "BleManager stopped")
@@ -225,12 +239,16 @@ object BleManager {
             .setConnectable(true)
             .build()
 
-        // Main advertising data: service UUID only (21 bytes with flags)
-        val advData = AdvertiseData.Builder()
+        // Main advertising data: service UUID + fingerprint (29 bytes <= 31 byte limit)
+        val advDataBuilder = AdvertiseData.Builder()
             .addServiceUuid(ParcelUuid(SERVICE_UUID))
             .setIncludeDeviceName(false)
             .setIncludeTxPowerLevel(false)
-            .build()
+
+        localFingerprint?.let { fp ->
+            advDataBuilder.addManufacturerData(MANUFACTURER_ID, fp)
+        }
+        val advData = advDataBuilder.build()
 
         // Scan response: fingerprint + TX power (separate 31-byte packet)
         val scanResponseBuilder = AdvertiseData.Builder()
@@ -271,6 +289,10 @@ object BleManager {
 
         val settings = ScanSettings.Builder()
             .setScanMode(scanMode)
+            .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+            .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+            .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
+            .setReportDelay(0L)
             .build()
 
         scanner?.startScan(filters, settings, scanCallback)

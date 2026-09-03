@@ -269,6 +269,13 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
     val snackbarHostState = remember { SnackbarHostState() }
     val clipboardManager: ClipboardManager = LocalClipboardManager.current
     val T = GhostTheme
+    var currentTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(5_000L)
+            currentTime = System.currentTimeMillis()
+        }
+    }
 
     // Reply mode
     var replyToMessage by remember { mutableStateOf<MessageEntity?>(null) }
@@ -354,7 +361,7 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                                         .copyOfRange(0, 4)
                                     peer.fingerprint.contentEquals(contactFp)
                                 } catch (_: Exception) { false }
-                                (matchesAddress || matchesFp) && (System.currentTimeMillis() - peer.lastSeen < 120_000L)
+                                (matchesAddress || matchesFp) && (currentTime - peer.lastSeen < 120_000L)
                             }
                             if (isOnline) {
                                 Box(

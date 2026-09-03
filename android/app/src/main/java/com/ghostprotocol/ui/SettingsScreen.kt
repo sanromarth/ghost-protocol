@@ -277,13 +277,20 @@ fun SettingsScreen(navController: NavController) {
                                     putExtra(Intent.EXTRA_STREAM, uri)
                                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                 }
-                                context.startActivity(Intent.createChooser(shareIntent, "Export Battery Report"))
+                                val chooser = Intent.createChooser(shareIntent, "Export Battery Report").apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(chooser)
                             } catch (e: Exception) {
-                                // FileProvider may not be configured — fall back to clipboard
+                                android.util.Log.e("GHOST", "Export report error: ${e.message}", e)
+                                // FileProvider may fail on some ROMs — fall back to clipboard
                                 val telemetry = BatteryTelemetry(context)
                                 val csv = telemetry.exportCsv()
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                                 clipboard.setPrimaryClip(ClipData.newPlainText("Battery Report", csv))
+                                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                    Toast.makeText(context, "Battery report copied to clipboard", Toast.LENGTH_SHORT).show()
+                                }
                             } finally {
                                 isExporting = false
                             }

@@ -48,6 +48,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED) {
+            startGhostService()
+            com.ghostprotocol.ble.BleManager.setLocalFingerprint(IdentityManager.getFingerprint())
+            com.ghostprotocol.ble.BleManager.start(applicationContext)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 

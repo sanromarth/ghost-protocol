@@ -4,6 +4,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -59,10 +61,43 @@ class GhostService : Service() {
     // Prevents duplicate chat bubbles from BLE GATT retries
     private val recentMessageHashes = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
+    // Listen for Bluetooth toggles to restart scanning & advertising automatically
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                when (state) {
+                    BluetoothAdapter.STATE_OFF -> {
+                        Log.d(TAG, ">>> Bluetooth turned OFF — stopping BleManager")
+                        BleManager.stop()
+                    }
+                    BluetoothAdapter.STATE_ON -> {
+                        Log.d(TAG, ">>> Bluetooth turned ON — restarting BleManager")
+                        serviceScope.launch {
+                            delay(1000L) // Wait for BT stack stabilization
+                            BleManager.setLocalFingerprint(IdentityManager.getFingerprint())
+                            BleManager.start(applicationContext)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
 
         IdentityManager.init(this)
+
+        // Register for Bluetooth state changes
+        try {
+            registerReceiver(
+                bluetoothStateReceiver,
+                IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register bluetoothStateReceiver: ${e.message}")
+        }
 
         // v0.2: Initialize power policy engine and telemetry
         powerPolicyEngine = PowerPolicyEngine(applicationContext)
@@ -177,6 +212,12 @@ class GhostService : Service() {
             timeSinceLastEncounterMs = timeSinceLastEncounter,
             isMoving = null // Motion sensor not implemented yet
         )
+
+        // Self-healing: ensure BLE radio is actively running if permissions & BT are enabled
+        if (!BleManager.isBleRunning()) {
+            BleManager.setLocalFingerprint(IdentityManager.getFingerprint())
+            BleManager.start(applicationContext)
+        }
 
         applyPowerPolicy(policy)
         return policy
@@ -866,6 +907,9 @@ class GhostService : Service() {
 
     override fun onDestroy() {
         Log.d(TAG, ">>> GhostService onDestroy")
+        try {
+            unregisterReceiver(bluetoothStateReceiver)
+        } catch (_: Exception) {}
         BatteryMonitor.stop()
         ghostRouter?.stop()
         serviceScope.cancel()

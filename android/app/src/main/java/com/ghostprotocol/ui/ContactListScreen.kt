@@ -15,11 +15,7 @@ import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -66,6 +62,13 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
     val contacts by viewModel.contacts.collectAsStateWithLifecycle(initialValue = emptyList())
     val blePeers by BleManager.peers.collectAsStateWithLifecycle(initialValue = emptyList())
     var searchQuery by remember { mutableStateOf("") }
+    var currentTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(5_000L)
+            currentTime = System.currentTimeMillis()
+        }
+    }
     val T = GhostTheme
 
     Scaffold(
@@ -244,7 +247,7 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                                     .copyOfRange(0, 4)
                                 peer.fingerprint.contentEquals(contactFp)
                             } catch (_: Exception) { false }
-                            (matchesAddress || matchesFp) && (System.currentTimeMillis() - peer.lastSeen < 120_000L)
+                            (matchesAddress || matchesFp) && (currentTime - peer.lastSeen < 120_000L)
                         }
                         PremiumContactRow(
                             contact = contact,
