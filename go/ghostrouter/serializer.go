@@ -68,3 +68,74 @@ func decodeMessage(data []byte) (*DecodeResult, error) {
 
 	return &DecodeResult{Header: &header, Payload: payload}, nil
 }
+
+// EncodeBatch packs multiple already-encoded messages into a single blob
+// for transmission in one GATT session.
+// Wire format: [1 byte: count N] [4 bytes: len1, BE uint32] [msg1] [4 bytes: len2] [msg2] ...
+// Each message is the output of EncodeMessage() (routing header + payload).
+func EncodeBatch(encodedMessages [][]byte) ([]byte, error) {
+	count := len(encodedMessages)
+	if count == 0 {
+		return nil, errors.New("cannot encode empty batch")
+	}
+	if count > 255 {
+		return nil, fmt.Errorf("batch too large: %d messages (max 255)", count)
+	}
+
+	// Calculate total size: 1 (count) + sum(4 + len(msg))
+	totalSize := 1
+	for _, msg := range encodedMessages {
+		totalSize += 4 + len(msg)
+	}
+
+	result := make([]byte, totalSize)
+	result[0] = byte(count)
+	offset := 1
+
+	for _, msg := range encodedMessages {
+		binary.BigEndian.PutUint32(result[offset:offset+4], uint32(len(msg)))
+		offset += 4
+		copy(result[offset:offset+len(msg)], msg)
+		offset += len(msg)
+	}
+
+	return result, nil
+}
+
+// DecodeBatch unpacks a batched blob into individual encoded messages.
+// Returns the individual messages (each still in routing header + payload format).
+func DecodeBatch(data []byte) ([][]byte, error) {
+	if len(data) < 1 {
+		return nil, errors.New("batch data too short: need at least 1 byte for count")
+	}
+
+	count := int(data[0])
+	if count == 0 {
+		return nil, errors.New("batch count is 0")
+	}
+
+	offset := 1
+	messages := make([][]byte, 0, count)
+
+	for i := 0; i < count; i++ {
+		if offset+4 > len(data) {
+			return nil, fmt.Errorf("batch truncated at message %d: need 4 bytes for length at offset %d, have %d", i, offset, len(data))
+		}
+		msgLen := int(binary.BigEndian.Uint32(data[offset : offset+4]))
+		offset += 4
+
+		if msgLen > 100000 {
+			return nil, fmt.Errorf("batch message %d too large: %d bytes", i, msgLen)
+		}
+		if offset+msgLen > len(data) {
+			return nil, fmt.Errorf("batch truncated at message %d: need %d bytes at offset %d, have %d", i, msgLen, offset, len(data))
+		}
+
+		msg := make([]byte, msgLen)
+		copy(msg, data[offset:offset+msgLen])
+		offset += msgLen
+		messages = append(messages, msg)
+	}
+
+	return messages, nil
+}

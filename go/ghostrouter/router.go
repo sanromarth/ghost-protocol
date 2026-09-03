@@ -65,6 +65,13 @@ type Router struct {
 	// In-memory dedup for delivered messages (prevents BLE GATT retry duplicates)
 	deliveredIDs map[string]bool
 
+	// relayWillingness controls whether this node accepts forwarded messages
+	// for relay. 0.0 = drop all forwarded messages (leaf node / low battery),
+	// 1.0 = accept all (full relay participation). Set from Kotlin via
+	// SetRelayWillingness(). This is a policy gate, not an algorithm change —
+	// the Spray-and-Wait binary split logic remains untouched.
+	relayWillingness float32
+
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
@@ -86,10 +93,11 @@ func NewRouter(localID []byte, dbPath string) (*Router, error) {
 	log.Printf("GHOST_ROUTE: NewRouter localID=%x (len=%d)", id[:min(8, len(id))], len(id))
 
 	return &Router{
-		store:        store,
-		localID:      id,
-		deliveredIDs: make(map[string]bool),
-		stopCh:       make(chan struct{}),
+		store:            store,
+		localID:          id,
+		deliveredIDs:     make(map[string]bool),
+		relayWillingness: 1.0, // Default: full relay participation
+		stopCh:           make(chan struct{}),
 	}, nil
 }
 
@@ -98,6 +106,30 @@ func (r *Router) SetHandler(h DeliverHandler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.handler = h
+}
+
+// SetRelayWillingness sets the relay willingness (0.0 to 1.0).
+// At 0, forwarded messages are dropped (leaf node / low battery).
+// At 1.0, all forwarded messages are accepted for relay.
+// This is a policy gate — the Spray-and-Wait binary split logic is untouched.
+func (r *Router) SetRelayWillingness(w float32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if w < 0 {
+		w = 0
+	}
+	if w > 1 {
+		w = 1
+	}
+	r.relayWillingness = w
+	log.Printf("GHOST_ROUTE: relay willingness set to %.2f", w)
+}
+
+// GetRelayWillingness returns the current relay willingness value.
+func (r *Router) GetRelayWillingness() float32 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.relayWillingness
 }
 
 // Start begins background goroutines for maintenance.
@@ -314,6 +346,18 @@ func (r *Router) OnPeerDiscovered(peerID []byte, rssi int) *BlobList {
 			shortHex(msg.ID), shortHex(pid), forwardMsg.CopiesRemaining, msg.CopiesRemaining, forwardMsg.HopCount)
 	}
 
+	// Batch multiple messages into a single blob for efficient GATT transmission.
+	// Single messages use the existing path (backward compatible).
+	if len(blobs) > 1 {
+		batched, err := EncodeBatch(blobs)
+		if err != nil {
+			log.Printf("GHOST_ROUTE: batch encoding failed (%d blobs): %v, falling back to first blob only", len(blobs), err)
+			return &BlobList{blobs: blobs[:1]}
+		}
+		log.Printf("GHOST_ROUTE: batched %d messages into %d bytes for peer %x", len(blobs), len(batched), shortHex(pid))
+		return &BlobList{blobs: [][]byte{batched}}
+	}
+
 	return &BlobList{blobs: blobs}
 }
 
@@ -384,6 +428,17 @@ func (r *Router) OnMessageReceived(data []byte) string {
 		return "dropped: TTL expired"
 	}
 
+	// Policy gate: relay willingness (set by PowerPolicyEngine via Kotlin)
+	// When willingness is 0, this node operates as a leaf — it won't store
+	// forwarded messages. This does NOT change the Spray-and-Wait algorithm;
+	// the sender's binary split logic is untouched. Only the receiver's
+	// decision to accept relay work is affected.
+	if r.relayWillingness <= 0 {
+		log.Printf("GHOST_ROUTE: dropping msg %x: low battery, not relaying (willingness=%.2f)",
+			shortHex(header.MessageID), r.relayWillingness)
+		return "dropped: low battery, not relaying"
+	}
+
 	// Forward: save to our store for spraying to future peers
 	msg := &Message{
 		ID:              header.MessageID,
@@ -416,11 +471,12 @@ func (r *Router) GetStats() string {
 	allPeers, _ := r.store.GetAllPeers()
 
 	stats := map[string]interface{}{
-		"localID":         fmt.Sprintf("%x", r.localID[:8]),
-		"messagesStored":  r.store.MessageCount(),
-		"messagesPending": len(pendingMsgs),
-		"peersKnown":      len(allPeers),
-		"peerCount":       r.store.PeerCount(),
+		"localID":          fmt.Sprintf("%x", r.localID[:8]),
+		"messagesStored":   r.store.MessageCount(),
+		"messagesPending":  len(pendingMsgs),
+		"peersKnown":       len(allPeers),
+		"peerCount":        r.store.PeerCount(),
+		"relayWillingness": r.relayWillingness,
 	}
 
 	data, _ := json.Marshal(stats)
