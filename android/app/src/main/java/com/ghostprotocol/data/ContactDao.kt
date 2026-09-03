@@ -20,6 +20,27 @@ interface ContactDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(contact: Contact)
 
+    @Transaction
+    suspend fun insertOrUpdate(contact: Contact): Long {
+        val existing = getById(contact.id)
+        if (existing != null) {
+            val updated = existing.copy(
+                name = contact.name,
+                ed25519PubKey = contact.ed25519PubKey,
+                x25519PubKey = contact.x25519PubKey,
+                bleAddress = contact.bleAddress ?: existing.bleAddress,
+                isVerified = existing.isVerified || contact.isVerified
+            )
+            insert(updated)
+            return 1L
+        } else {
+            insert(contact)
+            return 1L
+        }
+    }
+
+    suspend fun getByContactId(contactId: String): Contact? = getById(contactId)
+
     @Query("UPDATE contacts SET bleAddress = :address WHERE id = :id")
     suspend fun updateBleAddress(id: String, address: String)
 

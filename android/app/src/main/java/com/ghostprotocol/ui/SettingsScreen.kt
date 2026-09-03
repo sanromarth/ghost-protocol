@@ -308,6 +308,48 @@ fun SettingsScreen(navController: NavController) {
                     }
                 }
 
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Phase 2: Allow Nearby Discovery (read-only state reflection of Security Posture)
+                val isDiscoveryActive = currentPosture != SecurityPosture.STEALTH
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            if (!isDiscoveryActive) {
+                                Toast.makeText(context, "Switch to PROTEST mode to enable nearby discovery.", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Nearby discovery active (${currentPosture.name} mode)", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Allow Nearby Discovery", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            text = if (isDiscoveryActive) "Active in ${currentPosture.name} posture" else "Disabled in STEALTH posture",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (isDiscoveryActive) SecurityPostureManager.postureColor(currentPosture) else MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    Switch(
+                        checked = isDiscoveryActive,
+                        onCheckedChange = {
+                            if (!isDiscoveryActive) {
+                                Toast.makeText(context, "Switch to PROTEST mode to enable nearby discovery.", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Nearby discovery active (${currentPosture.name} mode)", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = GhostTheme.Purple,
+                            checkedTrackColor = GhostTheme.Purple.copy(alpha = 0.3f)
+                        )
+                    )
+                }
+
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // Current mode & posture display — observed live from GhostService

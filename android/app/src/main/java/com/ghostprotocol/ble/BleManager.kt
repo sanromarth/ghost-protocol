@@ -20,7 +20,11 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
+import com.ghostprotocol.discovery.DiscoveryManager
+import com.ghostprotocol.discovery.DiscoveryProtocol
 import com.ghostprotocol.router.GhostRouter
+import com.ghostprotocol.security.SecurityPosture
+import com.ghostprotocol.security.allowsUnknownPeerNotifications
 
 data class DiscoveredPeer(
     val address: String,
@@ -43,6 +47,9 @@ object BleManager {
 
     // Peer offline detection threshold: 12 seconds without advertising packet = offline
     const val PEER_OFFLINE_TIMEOUT_MS = 12_000L
+
+    var discoveryManager: DiscoveryManager? = null
+    var postureProvider: (() -> SecurityPosture)? = null
 
     private var context: Context? = null
     private var bluetoothManager: BluetoothManager? = null
@@ -358,6 +365,13 @@ object BleManager {
                     val fpHex = fingerprint?.joinToString("") { "%02x".format(it) } ?: "none"
                     Log.d(TAG, ">>> Discovered NEW peer MAC=$address RSSI=$rssi fingerprint=$fpHex")
                 }
+
+                if (fingerprint != null) {
+                    val posture = postureProvider?.invoke() ?: SecurityPosture.STEALTH
+                    if (posture.allowsUnknownPeerNotifications()) {
+                        discoveryManager?.onUnknownPeerDetected(address, fingerprint, rssi, posture)
+                    }
+                }
             }
         }
 
@@ -401,6 +415,22 @@ object BleManager {
             if (characteristic.uuid == MESSAGE_CHAR_UUID && value != null) {
                 Log.d(TAG, ">>> GATT SERVER: Write request from ${device.address}, ${value.size} bytes, responseNeeded=$responseNeeded")
                 gattBytesRx.addAndGet(value.size.toLong())
+
+                // Demux discovery opcodes (0x10 = DISCOVERY_REQUEST, 0x11 = DISCOVERY_RESPONSE)
+                if (value.isNotEmpty() && value[0] == DiscoveryProtocol.OPCODE_REQUEST) {
+                    if (responseNeeded) {
+                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                    }
+                    discoveryManager?.onIncomingRequest(device.address, value)
+                    return
+                } else if (value.isNotEmpty() && value[0] == DiscoveryProtocol.OPCODE_RESPONSE) {
+                    if (responseNeeded) {
+                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                    }
+                    discoveryManager?.onIncomingResponse(device.address, value)
+                    return
+                }
+
                 val emitted = _incomingMessages.tryEmit(IncomingBleMessage(device.address, value))
                 if (responseNeeded) {
                     val status = if (emitted) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE

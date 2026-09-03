@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.collectLatest
 import java.security.MessageDigest
 import java.util.UUID
 
+import com.ghostprotocol.discovery.DiscoveryManager
 import com.ghostprotocol.router.GhostRouter
 import com.ghostprotocol.security.SecurityPosture
 import com.ghostprotocol.security.SecurityPostureManager
@@ -56,9 +57,10 @@ class GhostService : Service() {
     private var ghostRouter: GhostRouter? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // v0.2/v0.3: Power policy engine, security posture manager, and telemetry
+    // v0.2/v0.3: Power policy engine, security posture manager, discovery manager, and telemetry
     private lateinit var powerPolicyEngine: PowerPolicyEngine
     private lateinit var securityPostureManager: SecurityPostureManager
+    private lateinit var discoveryManager: DiscoveryManager
     private lateinit var batteryTelemetry: BatteryTelemetry
     private var lastEncounterTimeMs: Long = System.currentTimeMillis()
     private var cpuWakeupCount: Int = 0
@@ -125,6 +127,18 @@ class GhostService : Service() {
             0
         )
         startForeground(1, notification)
+
+        // v0.3: Initialize DiscoveryManager for Nearby Peer Discovery
+        val db = GhostDatabase.getInstance(applicationContext)
+        discoveryManager = DiscoveryManager(
+            context = applicationContext,
+            contactDao = db.contactDao(),
+            messageDao = db.messageDao(),
+            coroutineScope = serviceScope,
+            postureProvider = { securityPostureManager.getPosture() }
+        )
+        BleManager.discoveryManager = discoveryManager
+        BleManager.postureProvider = { securityPostureManager.getPosture() }
 
         // React to posture changes immediately across the service lifecycle
         serviceScope.launch {
@@ -913,6 +927,27 @@ class GhostService : Service() {
                     }
                 }
             }
+            NotificationHelper.ACTION_INITIATE_DISCOVERY -> {
+                val mac = intent.getStringExtra(NotificationHelper.EXTRA_MAC) ?: intent.getStringExtra("EXTRA_MAC")
+                Log.d(TAG, "GHOST_DISCOVERY: Received ACTION_INITIATE_DISCOVERY for $mac")
+                if (mac != null) {
+                    discoveryManager.initiateDiscovery(mac)
+                }
+            }
+            NotificationHelper.ACTION_ACCEPT_DISCOVERY -> {
+                val mac = intent.getStringExtra(NotificationHelper.EXTRA_MAC) ?: intent.getStringExtra("EXTRA_MAC")
+                Log.d(TAG, "GHOST_DISCOVERY: Received ACTION_ACCEPT_DISCOVERY for $mac")
+                if (mac != null) {
+                    discoveryManager.acceptRequest(mac)
+                }
+            }
+            NotificationHelper.ACTION_DECLINE_DISCOVERY -> {
+                val mac = intent.getStringExtra(NotificationHelper.EXTRA_MAC) ?: intent.getStringExtra("EXTRA_MAC")
+                Log.d(TAG, "GHOST_DISCOVERY: Received ACTION_DECLINE_DISCOVERY for $mac")
+                if (mac != null) {
+                    discoveryManager.declineRequest(mac)
+                }
+            }
             "ACTION_SET_POWER_MODE" -> {
                 val modeStr = intent.getStringExtra("EXTRA_MODE")
                 Log.d(TAG, ">>> User requested power mode: $modeStr")
@@ -1016,6 +1051,11 @@ class GhostService : Service() {
             unregisterReceiver(bluetoothStateReceiver)
         } catch (_: Exception) {}
         BatteryMonitor.stop()
+        try {
+            discoveryManager.cleanup()
+            BleManager.discoveryManager = null
+            BleManager.postureProvider = null
+        } catch (_: Exception) {}
         ghostRouter?.stop()
         serviceScope.cancel()
         BleManager.stop()

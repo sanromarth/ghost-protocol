@@ -22,10 +22,16 @@ object NotificationHelper {
     private const val TAG = "NotificationHelper"
     private const val CHANNEL_VERIFY = "ghost_verify_channel_v2"
     const val CHANNEL_SERVICE = "ghost_mesh_channel"
+    const val CHANNEL_DISCOVERY = "ghost_discovery_channel"
 
     const val ACTION_CYCLE_POSTURE = "ACTION_CYCLE_POSTURE"
     const val ACTION_CYCLE_MODE = "ACTION_CYCLE_MODE"
     const val ACTION_STOP_SERVICE = "ACTION_STOP_SERVICE"
+
+    const val ACTION_INITIATE_DISCOVERY = "ACTION_INITIATE_DISCOVERY"
+    const val ACTION_ACCEPT_DISCOVERY = "ACTION_ACCEPT_DISCOVERY"
+    const val ACTION_DECLINE_DISCOVERY = "ACTION_DECLINE_DISCOVERY"
+    const val EXTRA_MAC = "EXTRA_MAC"
 
     fun buildServiceNotification(
         context: Context,
@@ -135,6 +141,115 @@ object NotificationHelper {
             }
         } catch (e: Exception) {
             Log.e(TAG, ">>> Error posting mutual verification notification: ${e.message}", e)
+        }
+    }
+
+    private fun ensureDiscoveryChannel(manager: NotificationManager) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_DISCOVERY,
+                "GHOST Discovery",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Nearby peer discovery alerts"
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 200, 100, 200)
+                enableLights(true)
+                setShowBadge(true)
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            }
+            manager.createNotificationChannel(channel)
+        }
+    }
+
+    fun showDiscoveryNotification(context: Context, mac: String, fingerprintShort: String) {
+        try {
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            ensureDiscoveryChannel(manager)
+
+            val connectIntent = Intent(context, GhostService::class.java).apply {
+                action = ACTION_INITIATE_DISCOVERY
+                putExtra(EXTRA_MAC, mac)
+            }
+            val connectPendingIntent = PendingIntent.getService(
+                context,
+                (mac.hashCode() and 0x7FFFFFFF),
+                connectIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notificationId = 3000 + (mac.hashCode() and 0xFFFF)
+            val notification = NotificationCompat.Builder(context, CHANNEL_DISCOVERY)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle("GHOST User Nearby")
+                .setContentText("Discovered peer #$fingerprintShort nearby. Tap to connect.")
+                .setColor(0xFF9D4EDD.toInt())
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .addAction(android.R.drawable.ic_menu_send, "Connect", connectPendingIntent)
+                .build()
+
+            manager.notify(notificationId, notification)
+            Log.d(TAG, "GHOST_DISCOVERY: Discovery notification posted for $mac (id=$notificationId)")
+        } catch (e: Exception) {
+            Log.e(TAG, "GHOST_DISCOVERY: Error showing discovery notification: ${e.message}", e)
+        }
+    }
+
+    fun showIncomingDiscoveryNotification(context: Context, mac: String, name: String, handle: String) {
+        try {
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            ensureDiscoveryChannel(manager)
+
+            val acceptIntent = Intent(context, GhostService::class.java).apply {
+                action = ACTION_ACCEPT_DISCOVERY
+                putExtra(EXTRA_MAC, mac)
+            }
+            val acceptPendingIntent = PendingIntent.getService(
+                context,
+                ((mac.hashCode() * 31 + 1) and 0x7FFFFFFF),
+                acceptIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val declineIntent = Intent(context, GhostService::class.java).apply {
+                action = ACTION_DECLINE_DISCOVERY
+                putExtra(EXTRA_MAC, mac)
+            }
+            val declinePendingIntent = PendingIntent.getService(
+                context,
+                ((mac.hashCode() * 31 + 2) and 0x7FFFFFFF),
+                declineIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notificationId = 4000 + (mac.hashCode() and 0xFFFF)
+            val notification = NotificationCompat.Builder(context, CHANNEL_DISCOVERY)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle("Incoming Contact Request")
+                .setContentText("User '$name' (#$handle) wants to connect.")
+                .setColor(0xFF9D4EDD.toInt())
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
+                .setAutoCancel(true)
+                .addAction(android.R.drawable.ic_input_add, "Accept", acceptPendingIntent)
+                .addAction(android.R.drawable.ic_delete, "Decline", declinePendingIntent)
+                .build()
+
+            manager.notify(notificationId, notification)
+            Log.d(TAG, "GHOST_DISCOVERY: Incoming request notification posted for $mac from $name (id=$notificationId)")
+        } catch (e: Exception) {
+            Log.e(TAG, "GHOST_DISCOVERY: Error showing incoming discovery notification: ${e.message}", e)
+        }
+    }
+
+    fun cancelDiscoveryNotification(context: Context, mac: String) {
+        try {
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.cancel(3000 + (mac.hashCode() and 0xFFFF))
+            manager.cancel(4000 + (mac.hashCode() and 0xFFFF))
+        } catch (e: Exception) {
+            Log.e(TAG, "GHOST_DISCOVERY: Error cancelling discovery notification: ${e.message}", e)
         }
     }
 }

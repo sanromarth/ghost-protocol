@@ -19,6 +19,8 @@ enum class SecurityPosture {
     EMERGENCY   // Maximum radio duty cycle, auto-forward broadcast alerts (placeholder for v0.4), zero screen-lock timeout suggestion, relay willingness 1.0.
 }
 
+fun SecurityPosture.allowsUnknownPeerNotifications(): Boolean = this != SecurityPosture.STEALTH
+
 class SecurityPostureManager(context: Context) {
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

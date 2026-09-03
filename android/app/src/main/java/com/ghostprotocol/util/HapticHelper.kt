@@ -45,4 +45,11 @@ object HapticHelper {
             Log.e(TAG, "Error triggering heartbeat haptic: ${e.message}")
         }
     }
+
+    /**
+     * Alias for triggerHeartbeat to match Phase 2 discovery specification.
+     */
+    fun heartbeatVerify(context: Context) {
+        triggerHeartbeat(context)
+    }
 }
