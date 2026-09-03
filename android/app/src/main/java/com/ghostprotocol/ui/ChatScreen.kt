@@ -140,9 +140,8 @@ class ChatViewModel(application: Application, private val contactId: String) : A
                                     messageDao.updateStatus(message.id, MessageEntity.STATUS_SENT)
                                 } else {
                                     // Direct send failed (peer disconnected, screen off, or out of range)
-                                    // Hold as SPRAYED in Room, and queue in Go router for spray delivery
+                                    // Hold as SPRAYED in Room (already queued in Go router on line 135 for spray delivery)
                                     messageDao.updateStatus(message.id, MessageEntity.STATUS_SPRAYED)
-                                    try { router.sendMessage(dstId, ciphertext) } catch (_: Exception) {}
                                 }
                             }
                         }
