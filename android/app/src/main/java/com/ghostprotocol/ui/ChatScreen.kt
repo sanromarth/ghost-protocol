@@ -273,7 +273,7 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
     var currentTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) {
-            kotlinx.coroutines.delay(5_000L)
+            kotlinx.coroutines.delay(1_000L)
             currentTime = System.currentTimeMillis()
         }
     }
@@ -338,7 +338,7 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                                     .copyOfRange(0, 4)
                                 peer.fingerprint.contentEquals(contactFp)
                             } catch (_: Exception) { false }
-                            (matchesAddress || matchesFp) && (currentTime - peer.lastSeen < 120_000L)
+                            (matchesAddress || matchesFp) && (currentTime - peer.lastSeen < BleManager.PEER_OFFLINE_TIMEOUT_MS)
                         }
                     }
                     val isOnline = matchedPeer != null

@@ -11,6 +11,7 @@ import android.os.ParcelUuid
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -40,6 +41,9 @@ object BleManager {
     val MESSAGE_CHAR_UUID: UUID = UUID.fromString("47484F53-5401-1000-8000-00805F9B34FB")
     private const val MANUFACTURER_ID = 0x00FF
 
+    // Peer offline detection threshold: 12 seconds without advertising packet = offline
+    const val PEER_OFFLINE_TIMEOUT_MS = 12_000L
+
     private var context: Context? = null
     private var bluetoothManager: BluetoothManager? = null
     private var adapter: BluetoothAdapter? = null
@@ -54,6 +58,7 @@ object BleManager {
     private val peersMap = ConcurrentHashMap<String, DiscoveredPeer>()
     private val _peers = MutableStateFlow<List<DiscoveredPeer>>(emptyList())
     val peers: StateFlow<List<DiscoveredPeer>> = _peers.asStateFlow()
+    private var peerPruningJob: Job? = null
 
     private val _incomingMessages = MutableSharedFlow<IncomingBleMessage>(replay = 0, extraBufferCapacity = 64)
     val incomingMessages: SharedFlow<IncomingBleMessage> = _incomingMessages.asSharedFlow()
@@ -128,14 +133,43 @@ object BleManager {
         startGattServer()
         startAdvertising()
         startScanning()
+        startPeerPruning()
 
         isRunning = true
         Log.d(TAG, "BleManager started successfully")
     }
 
+    private fun startPeerPruning() {
+        peerPruningJob?.cancel()
+        peerPruningJob = CoroutineScope(Dispatchers.Default).launch {
+            while (isActive) {
+                delay(2000L)
+                val cutoff = System.currentTimeMillis() - PEER_OFFLINE_TIMEOUT_MS
+                var changed = false
+                val it = peersMap.entries.iterator()
+                while (it.hasNext()) {
+                    val entry = it.next()
+                    if (entry.value.lastSeen < cutoff) {
+                        it.remove()
+                        changed = true
+                        Log.d(TAG, ">>> Pruned offline peer: ${entry.key} (last seen ${(System.currentTimeMillis() - entry.value.lastSeen)/1000}s ago)")
+                    }
+                }
+                if (changed) {
+                    _peers.value = peersMap.values.toList()
+                }
+            }
+        }
+    }
+
     @SuppressLint("MissingPermission")
     fun stop() {
         if (!isRunning && scanner == null && advertiser == null && gattServer == null) return
+
+        peerPruningJob?.cancel()
+        peerPruningJob = null
+        peersMap.clear()
+        _peers.value = emptyList()
 
         // Accumulate final scan/advertise time
         stopScanTimeTelemetry()
