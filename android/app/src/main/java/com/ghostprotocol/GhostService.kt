@@ -483,6 +483,7 @@ class GhostService : Service() {
                 )
                 messageDao.insert(message)
                 Log.d(TAG, ">>> ROUTED MESSAGE SAVED: from '${senderName ?: contact.name}' text=\"$text\"")
+                checkAndHandleVerificationEvent(senderContactId, senderName ?: contact.name, text, messageDao, contactDao)
 
             } catch (e: Exception) {
                 Log.e(TAG, ">>> ROUTED MESSAGE FAILED: ${e.message}")
@@ -777,9 +778,90 @@ class GhostService : Service() {
             messageDao.insert(message)
             messagesDeliveredCount++
             Log.d(TAG, ">>> MESSAGE SAVED: from '${senderName ?: contact.name}' text=\"$text\"")
+            checkAndHandleVerificationEvent(senderContactId, senderName ?: contact.name, text, messageDao, contactDao)
 
         } catch (e: Exception) {
             Log.e(TAG, ">>> DIRECT DECRYPT FAILED: ${e.message}")
+        }
+    }
+
+    private fun sendVerificationPayload(contact: com.ghostprotocol.data.Contact, wireText: String) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val contactX25519Pub = Base64.decode(contact.x25519PubKey, Base64.NO_WRAP)
+                val myEd25519PubKey = IdentityManager.getEd25519PubKey()
+                val plaintextBytes = wireText.toByteArray(Charsets.UTF_8)
+                val payload = myEd25519PubKey + plaintextBytes
+                val signature = GhostCrypto.sign(IdentityManager.getEd25519Seed(), payload)
+                val fullPayload = payload + signature
+                val ciphertext = GhostCrypto.encrypt(contactX25519Pub, fullPayload)
+
+                val targetAddress = contact.bleAddress ?: run {
+                    val contactPub = Base64.decode(contact.ed25519PubKey, Base64.NO_WRAP)
+                    val fp = MessageDigest.getInstance("SHA-256").digest(contactPub).copyOfRange(0, 4)
+                    BleManager.peers.value.find { it.fingerprint?.contentEquals(fp) == true }?.address
+                }
+
+                if (targetAddress != null) {
+                    BleManager.sendMessage(targetAddress, ciphertext) { success ->
+                        Log.d(TAG, ">>> VERIFICATION PAYLOAD to ${contact.name} ($targetAddress): $success")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, ">>> Error sending verification payload: ${e.message}")
+            }
+        }
+    }
+
+    private suspend fun checkAndHandleVerificationEvent(
+        senderContactId: String,
+        contactName: String,
+        text: String,
+        messageDao: com.ghostprotocol.data.MessageDao,
+        contactDao: com.ghostprotocol.data.ContactDao
+    ) {
+        if (text.startsWith("* verified ")) {
+            val allMessages = messageDao.getMessagesForContactOnce(senderContactId)
+            val alreadyMutuallyVerified = allMessages.any { it.content.startsWith("* mutual verification with ") }
+
+            if (!alreadyMutuallyVerified) {
+                contactDao.updateVerified(senderContactId, true)
+                val mutualMsg = MessageEntity(
+                    id = java.util.UUID.randomUUID().toString(),
+                    contactId = senderContactId,
+                    content = "* mutual verification with $contactName *",
+                    isOutgoing = false,
+                    isVerified = true,
+                    status = MessageEntity.STATUS_DELIVERED,
+                    timestamp = System.currentTimeMillis()
+                )
+                messageDao.insert(mutualMsg)
+                com.ghostprotocol.util.NotificationHelper.showMutualVerificationNotification(applicationContext, contactName)
+
+                // Send mutual ack back to peer
+                val contact = contactDao.getById(senderContactId)
+                if (contact != null) {
+                    val myName = IdentityManager.getDisplayName()
+                    sendVerificationPayload(contact, "* mutual verification with $myName *")
+                }
+            }
+        } else if (text.startsWith("* mutual verification with ")) {
+            val allMessages = messageDao.getMessagesForContactOnce(senderContactId)
+            val alreadyMutuallyVerified = allMessages.any { it.content.startsWith("* mutual verification with ") }
+            if (!alreadyMutuallyVerified) {
+                contactDao.updateVerified(senderContactId, true)
+                val mutualMsg = MessageEntity(
+                    id = java.util.UUID.randomUUID().toString(),
+                    contactId = senderContactId,
+                    content = "* mutual verification with $contactName *",
+                    isOutgoing = false,
+                    isVerified = true,
+                    status = MessageEntity.STATUS_DELIVERED,
+                    timestamp = System.currentTimeMillis()
+                )
+                messageDao.insert(mutualMsg)
+                com.ghostprotocol.util.NotificationHelper.showMutualVerificationNotification(applicationContext, contactName)
+            }
         }
     }
 

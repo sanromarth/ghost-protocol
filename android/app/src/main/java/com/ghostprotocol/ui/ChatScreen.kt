@@ -6,6 +6,7 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
@@ -378,12 +379,25 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                     }
 
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            contact?.name ?: "Chat",
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 18.sp,
-                            color = T.TextPrimary
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                contact?.name ?: "Chat",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 18.sp,
+                                color = T.TextPrimary
+                            )
+                            val isMutuallyVerified = messages.any { it.content.startsWith("* mutual verification with ") }
+                            val isVerified = contact?.isVerified == true || messages.any { it.content.startsWith("* verified ") }
+                            if (isMutuallyVerified) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("🔒", fontSize = 13.sp)
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Text("✔", fontSize = 13.sp, color = T.Online, fontWeight = FontWeight.Bold)
+                            } else if (isVerified) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("✔", fontSize = 13.sp, color = T.PurpleLight, fontWeight = FontWeight.Bold)
+                            }
+                        }
                         Text(
                             text = "#" + (contact?.id?.take(6) ?: ""),
                             fontSize = 12.sp,
@@ -560,25 +574,29 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                     when (item) {
                         is ChatItem.TimeHeader -> TimeHeaderBubble(item.label)
                         is ChatItem.Msg -> {
-                            SwipeableMessage(
-                                onReply = { replyToMessage = item.message },
-                                onCopy = {
-                                    clipboardManager.setText(AnnotatedString(item.message.content))
-                                },
-                                onDelete = {
-                                    selectedMessage = item.message
-                                    showMessageActions = true
-                                }
-                            ) {
-                                PremiumMessageBubble(
-                                    message = item.message,
-                                    groupPosition = item.groupPosition,
-                                    onRetry = { viewModel.retryMessage(it) },
-                                    onLongPress = {
+                            if (item.message.content.startsWith("* ") && item.message.content.endsWith(" *")) {
+                                SystemVerificationBubble(item.message)
+                            } else {
+                                SwipeableMessage(
+                                    onReply = { replyToMessage = item.message },
+                                    onCopy = {
+                                        clipboardManager.setText(AnnotatedString(item.message.content))
+                                    },
+                                    onDelete = {
                                         selectedMessage = item.message
                                         showMessageActions = true
                                     }
-                                )
+                                ) {
+                                    PremiumMessageBubble(
+                                        message = item.message,
+                                        groupPosition = item.groupPosition,
+                                        onRetry = { viewModel.retryMessage(it) },
+                                        onLongPress = {
+                                            selectedMessage = item.message
+                                            showMessageActions = true
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
@@ -703,6 +721,48 @@ fun TimeHeaderBubble(label: String) {
                 .background(T.Surface1, RoundedCornerShape(12.dp))
                 .padding(horizontal = 12.dp, vertical = 4.dp)
         )
+    }
+}
+
+@Composable
+fun SystemVerificationBubble(message: MessageEntity) {
+    val T = GhostTheme
+    val timeStr = remember(message.timestamp) {
+        val sdf = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+        sdf.format(java.util.Date(message.timestamp))
+    }
+    val isMutual = message.content.contains("mutual verification")
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier = Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .background(if (isMutual) T.Online.copy(alpha = 0.12f) else T.Surface2.copy(alpha = 0.5f))
+                .border(
+                    width = 1.dp,
+                    color = if (isMutual) T.Online.copy(alpha = 0.4f) else T.Surface3,
+                    shape = RoundedCornerShape(12.dp)
+                )
+                .padding(horizontal = 12.dp, vertical = 5.dp)
+        ) {
+            if (isMutual) {
+                Text("🔒 ", fontSize = 12.sp)
+            }
+            Text(
+                text = "${message.content} [$timeStr]",
+                color = if (isMutual) T.Online else T.TextMuted,
+                fontSize = 12.sp,
+                fontWeight = if (isMutual) FontWeight.SemiBold else FontWeight.Normal,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+            )
+        }
     }
 }
 

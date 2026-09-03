@@ -9,5 +9,6 @@ data class Contact(
     val ed25519PubKey: String,            // Base64-encoded 32-byte key
     val x25519PubKey: String,             // Base64-encoded 32-byte key
     val bleAddress: String? = null,       // MAC address, updated on BLE discovery
+    val isVerified: Boolean = false,
     val createdAt: Long = System.currentTimeMillis()
 )

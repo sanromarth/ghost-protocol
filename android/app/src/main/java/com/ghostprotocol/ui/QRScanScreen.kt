@@ -168,20 +168,81 @@ fun QRScanScreen(navController: NavController) {
                                                                     return@let
                                                                 }
                                                                 
-                                                                scannedContact = Contact(
+                                                                val contact = Contact(
                                                                     id = id,
                                                                     name = name,
                                                                     ed25519PubKey = Base64.encodeToString(ed25519Pub, Base64.NO_WRAP),
                                                                     x25519PubKey = Base64.encodeToString(x25519Pub, Base64.NO_WRAP),
+                                                                    isVerified = true,
                                                                     createdAt = System.currentTimeMillis()
                                                                 )
-                                                                
-                                                                // Save immediately + show success
+                                                                scannedContact = contact
+
                                                                 scope.launch(Dispatchers.IO) {
-                                                                    GhostDatabase.getInstance(context).contactDao().insert(scannedContact!!)
+                                                                    val db = GhostDatabase.getInstance(context)
+                                                                    db.contactDao().insert(contact)
+
+                                                                    val existingMessages = db.messageDao().getMessagesForContactOnce(id)
+                                                                    val hasVerifiedMsg = existingMessages.any { it.content.startsWith("* verified ") }
+                                                                    if (!hasVerifiedMsg) {
+                                                                        val verifiedMsg = com.ghostprotocol.data.MessageEntity(
+                                                                            id = java.util.UUID.randomUUID().toString(),
+                                                                            contactId = id,
+                                                                            content = "* verified $name *",
+                                                                            isOutgoing = false,
+                                                                            isVerified = true,
+                                                                            status = com.ghostprotocol.data.MessageEntity.STATUS_DELIVERED,
+                                                                            timestamp = System.currentTimeMillis()
+                                                                        )
+                                                                        db.messageDao().insert(verifiedMsg)
+                                                                    }
+
+                                                                    val alreadyReceivedVerification = existingMessages.any { it.content.startsWith("* verified ") }
+                                                                    val alreadyMutuallyVerified = existingMessages.any { it.content.startsWith("* mutual verification with ") }
+
+                                                                    if (alreadyReceivedVerification && !alreadyMutuallyVerified) {
+                                                                        val mutualMsg = com.ghostprotocol.data.MessageEntity(
+                                                                            id = java.util.UUID.randomUUID().toString(),
+                                                                            contactId = id,
+                                                                            content = "* mutual verification with $name *",
+                                                                            isOutgoing = false,
+                                                                            isVerified = true,
+                                                                            status = com.ghostprotocol.data.MessageEntity.STATUS_DELIVERED,
+                                                                            timestamp = System.currentTimeMillis()
+                                                                        )
+                                                                        db.messageDao().insert(mutualMsg)
+                                                                        com.ghostprotocol.util.NotificationHelper.showMutualVerificationNotification(context, name)
+                                                                    }
+
+                                                                    // Send verification handshake packet over BLE to peer
+                                                                    try {
+                                                                        val myName = com.ghostprotocol.IdentityManager.getDisplayName()
+                                                                        val myEd25519PubKey = com.ghostprotocol.IdentityManager.getEd25519PubKey()
+                                                                        val wireText = if (alreadyReceivedVerification) "* mutual verification with $myName *" else "* verified $myName *"
+                                                                        val plaintextBytes = wireText.toByteArray(Charsets.UTF_8)
+                                                                        val payload = myEd25519PubKey + plaintextBytes
+                                                                        val signature = com.ghostprotocol.crypto.GhostCrypto.sign(com.ghostprotocol.IdentityManager.getEd25519Seed(), payload)
+                                                                        val ciphertext = com.ghostprotocol.crypto.GhostCrypto.encrypt(x25519Pub, payload + signature)
+
+                                                                        val targetAddress = contact.bleAddress ?: run {
+                                                                            val fp = MessageDigest.getInstance("SHA-256").digest(ed25519Pub).copyOfRange(0, 4)
+                                                                            com.ghostprotocol.ble.BleManager.peers.value.find { it.fingerprint?.contentEquals(fp) == true }?.address
+                                                                        }
+                                                                        if (targetAddress != null) {
+                                                                            com.ghostprotocol.ble.BleManager.sendMessage(targetAddress, ciphertext) {}
+                                                                        }
+                                                                    } catch (e: Exception) {
+                                                                        e.printStackTrace()
+                                                                    }
+
+                                                                    // Automatic transition: like Bitchat, immediately open your QR code so the other device can scan back!
                                                                     scope.launch(Dispatchers.Main) {
                                                                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                                        showSuccessCard = true
+                                                                        android.widget.Toast.makeText(context, "Verified $name! Showing your QR code...", android.widget.Toast.LENGTH_SHORT).show()
+                                                                        delay(400)
+                                                                        navController.navigate("qr_show") {
+                                                                            popUpTo("contacts")
+                                                                        }
                                                                     }
                                                                 }
                                                             } else {
@@ -312,6 +373,15 @@ fun QRScanScreen(navController: NavController) {
             navigationIcon = {
                 IconButton(onClick = { navController.popBackStack() }) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                }
+            },
+            actions = {
+                TextButton(onClick = {
+                    navController.navigate("qr_show") {
+                        popUpTo("qr_scan") { inclusive = true }
+                    }
+                }) {
+                    Text("My QR", color = Color.White, fontWeight = FontWeight.Bold)
                 }
             },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),

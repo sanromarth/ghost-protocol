@@ -8,6 +8,9 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE contactId = :contactId ORDER BY timestamp ASC")
     fun getForContact(contactId: String): Flow<List<MessageEntity>>
 
+    @Query("SELECT * FROM messages WHERE contactId = :contactId ORDER BY timestamp ASC")
+    suspend fun getMessagesForContactOnce(contactId: String): List<MessageEntity>
+
     @Insert
     suspend fun insert(message: MessageEntity)
 

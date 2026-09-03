@@ -315,15 +315,25 @@ fun PremiumContactRow(contact: Contact, isOnline: Boolean, onClick: () -> Unit) 
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = contact.name,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = T.TextPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.weight(1f, fill = false)
-                )
+                ) {
+                    Text(
+                        text = contact.name,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = T.TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (contact.isVerified) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("🔒", fontSize = 12.sp)
+                        Spacer(modifier = Modifier.width(2.dp))
+                        Text("✔", fontSize = 12.sp, color = T.Online, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
             Spacer(modifier = Modifier.height(2.dp))
             Text(

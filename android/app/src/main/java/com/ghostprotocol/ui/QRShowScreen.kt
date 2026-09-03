@@ -69,6 +69,15 @@ fun QRShowScreen(navController: NavController) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = T.TextPrimary)
                     }
                 },
+                actions = {
+                    TextButton(onClick = {
+                        navController.navigate("qr_scan") {
+                            popUpTo("qr_show") { inclusive = true }
+                        }
+                    }) {
+                        Text("Scan QR", color = T.PurpleLight, fontWeight = FontWeight.Bold)
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
             )
         }
@@ -168,7 +177,23 @@ fun QRShowScreen(navController: NavController) {
                 )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(16.dp))
+
+            OutlinedButton(
+                onClick = {
+                    navController.navigate("qr_scan") {
+                        popUpTo("qr_show") { inclusive = true }
+                    }
+                },
+                shape = RoundedCornerShape(14.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, T.Purple.copy(alpha = 0.6f)),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = T.PurpleLight),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+            ) {
+                Text("📷  Scan Their QR Code", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
 
             // Subtitle
             Text(

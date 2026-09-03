@@ -26,6 +26,9 @@ interface ContactDao {
     @Query("UPDATE contacts SET name = :name WHERE id = :id")
     suspend fun updateName(id: String, name: String)
 
+    @Query("UPDATE contacts SET isVerified = :isVerified WHERE id = :id")
+    suspend fun updateVerified(id: String, isVerified: Boolean)
+
     @Delete
     suspend fun delete(contact: Contact)
 
