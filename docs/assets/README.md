@@ -8,7 +8,8 @@ Official brand assets and visual identity guidelines for the GHOST Protocol proj
 |---|---|---|---|
 | [`icon-512.png`](icon-512.png) | 512 × 512 | PNG (32-bit RGBA) | Android launcher icon, app store icon, square avatars |
 | [`logo.png`](logo.png) | 512 × 512 | PNG (32-bit RGBA) | Repository header logo (scaled to 120px in `README.md`) |
-| [`logo-wordmark.png`](logo-wordmark.png) | 800 × 200 | PNG (32-bit RGBA) | Horizontal header logo for documentation, presentations, and web headers |
+| [`logo-wordmark.png`](logo-wordmark.png) | 800 × 200 | PNG (32-bit RGBA) | Horizontal header logo (light text) for dark mode web pages, GitHub dark, and decks |
+| [`logo-wordmark-dark.png`](logo-wordmark-dark.png) | 800 × 200 | PNG (32-bit RGBA) | Horizontal header logo (dark text) for light mode websites, white documents, and light themes |
 | [`social-preview.png`](social-preview.png) | 1280 × 640 | PNG (RGB) | GitHub Social Preview OpenGraph card (Twitter/X, LinkedIn, Discord previews) |
 | [`favicon.png`](favicon.png) | 32 × 32 | PNG (32-bit RGBA) | Browser favicon and taskbar icon |
 | [`logo.svg`](logo.svg) | Vector | Scalable SVG | Infinite-resolution vector asset for print, web, and custom sizing |
