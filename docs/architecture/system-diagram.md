@@ -1,23 +1,27 @@
 # GHOST Protocol System Architecture
 
-> **Version:** v0.1.5 — hardened after 10 audit rounds (67 bugs fixed).
+> **Version:** v0.2.0 — includes PowerPolicyEngine, BatteryTelemetry, and GATT message batching.
 > For the full 7-layer vision, see `docs/rfc/rfc-001-physics.md` through `rfc-007-application.md`.
 
 ## 1. Overview
 
-GHOST Protocol v0.1.5 is a 3-component offline mesh messenger for Android. Two phones discover each other over BLE 5.0, exchange Ed25519/X25519 keys via QR code, and send end-to-end encrypted text messages routed through a Go Spray-and-Wait router. Messages can hop through intermediate phones when sender and receiver are not in direct BLE range. No servers, no internet, no accounts.
+GHOST Protocol v0.2.0 is an offline mesh messenger for Android. Two phones discover each other over BLE 5.0, exchange Ed25519/X25519 keys via QR code, and send end-to-end encrypted text messages routed through a Go Spray-and-Wait router. Messages can hop through intermediate phones when sender and receiver are not in direct BLE range. 
 
-**Languages:** Kotlin (UI + BLE + glue layer), Rust (crypto via JNI), Go (routing via gomobile)
+v0.2.0 introduces a centralized **PowerPolicyEngine** (4 dynamic modes: ACTIVE, ECO, CRITICAL, DEEP_SLEEP), **Message Batching** over single GATT sessions with sequential write-chaining, **Relay Willingness Gating** to shed relay burdens on dying batteries, and **BatteryTelemetry** with SQLite snapshot logging and CSV export.
+
+**Languages:** Kotlin (UI + BLE + Power + glue layer), Rust (crypto via JNI), Go (routing + batch serializer via gomobile)
 
 ## 2. Implemented Architecture
 
 ```mermaid
 graph TD
     subgraph "Android App (Kotlin)"
-        UI[Jetpack Compose UI<br>ChatScreen, ContactList, QR, Settings]
-        Service[GhostService<br>Foreground, WakeLock, BLE management]
-        BLE[BleManager<br>BLE 5.0 advertising, scanning, GATT]
-        Room[Room Database<br>Contacts, Messages, Indexes added]
+        UI[Jetpack Compose UI<br>ChatScreen, ContactList, Settings, QR]
+        Service[GhostService<br>Foreground, WakeLock, 30s Policy Loop]
+        Power[PowerPolicyEngine<br>ACTIVE / ECO / CRITICAL / DEEP_SLEEP]
+        Telem[BatteryTelemetry<br>Room DB v4, 7-day retention, CSV export]
+        BLE[BleManager<br>BLE 5.0 adv/scan policy, GATT batching]
+        Room[Room Database<br>Contacts, Messages, Telemetry]
     end
 
     subgraph "Rust (JNI)"
@@ -25,16 +29,22 @@ graph TD
     end
 
     subgraph "Go (gomobile)"
-        Router[GhostRouter<br>Spray-and-Wait, BoltDB]
+        Router[GhostRouter<br>Spray-and-Wait, BoltDB, Relay Gate]
+        Batch[Batch Serializer<br>EncodeBatch / DecodeBatch]
     end
 
     UI <--> Service
+    Service --> Power
+    Service --> Telem
+    Telem --> Room
     Service <--> BLE
     Service <--> Room
     UI --> Crypto
     Service --> Crypto
     Service <--> Router
-    BLE -.->|"BLE 5.0 GATT (10s timeout)"| BLE
+    Router --> Batch
+    Service -.->|"setRelayWillingness(w)"| Router
+    BLE -.->|"GATT Batch (MTU 512, chained writes)"| BLE
 ```
 
 ## 3. FFI Boundaries
@@ -109,9 +119,9 @@ sequenceDiagram
 
 | Component | Language | Size | Purpose |
 |---|---|---|---|
-| `android/app/` | Kotlin | ~4,000 LOC | UI (Compose), BLE (GATT), Room DB, Service |
+| `android/app/` | Kotlin | ~5,200 LOC | UI (Compose), BLE (GATT + batching), PowerPolicyEngine, BatteryTelemetry, Room DB (v4) |
 | `rust/ghost-crypto/` | Rust | ~300 LOC | Ed25519 sign/verify, X25519 DH, AES-256-GCM encrypt/decrypt |
-| `go/ghostrouter/` | Go | ~800 LOC | Spray-and-Wait routing, BoltDB persistence, wire format |
+| `go/ghostrouter/` | Go | ~950 LOC | Spray-and-Wait routing, batch serializer, relay willingness gating, BoltDB store |
 
 ## 7. Key Data Structures
 
@@ -124,7 +134,9 @@ sequenceDiagram
 | Router peer ID | `SHA-256(ed25519_pub)` → 32 raw bytes |
 | Message ID | `computeMessageID(payload + random_nonce)` → collision-resistant |
 | Encrypted payload | `[ed25519_pub(32)] [username\0message] [ed25519_sig(64)]` → encrypted with X25519+AES-256-GCM |
-| Routing wire format | `[4B headerLen][JSON RoutingHeader][encrypted payload]` |
+| Single wire format | `[4B headerLen][JSON RoutingHeader][encrypted payload]` |
+| Batch wire format | `[1B count][4B len1][msg1][4B len2][msg2]...` |
+| Telemetry record | `TelemetryEntity` in Room (`telemetry_snapshots`): 15 metrics, 7-day retention |
 
 ## 8. Deployment Model
 - Single debug APK (~46 MB, includes arm64 + x86_64 native libs)
