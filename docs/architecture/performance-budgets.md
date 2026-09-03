@@ -1,43 +1,48 @@
 # GHOST Protocol Performance Budgets
 
-> **Version:** v0.1.5 — measured values from actual hardware testing.
+> **Version:** v0.2.0 — measured values from actual hardware testing and power policy engine.
 > Target device: 1GB RAM, 8GB storage, Android 8.0+, quad-core ARM Cortex-A53 @ 1.4GHz
 
-## 1. Measured Performance (v0.1.5)
+## 1. Measured Performance (v0.2.0)
 
 | Metric | Value | Notes |
 |---|---|---|
 | APK size (debug) | 46 MB | Includes Rust .so (arm64 + x86_64) + Go .aar (arm64 + x86_64). Release with R8 would be ~15-20MB. |
 | Cold start time | ~1.5s | Measured on-device via `ActivityTaskManager: Displayed` logcat |
 | BLE message latency | 2–4 seconds | Dominated by BLE connection setup (connect → MTU → discover → write → disconnect) |
+| Batched BLE latency | ~4–5 seconds (5 msgs) | Single connection setup + sequential GATT writes (vs ~15–20s for 5 individual sessions) |
 | BLE advertising packet | 21 bytes (main) + 11 bytes (scan response) | Under the 31-byte BLE legacy limit |
-| Go router AAR | 4.9 MB | arm64 + x86_64 native libs |
+| Go router AAR | ~5.0 MB | arm64 + x86_64 native libs (includes batch serializer + relay gate) |
 | Rust crypto .so | ~300 KB per ABI | Ed25519 + X25519 + AES-256-GCM |
-| Go unit tests | 13/13 pass in 0.009s | Store, serializer, router, spray, dedup |
+| Go unit tests | 15/15 pass in <0.05s | Store, serializer, router, spray, batch roundtrip, relay willingness gate |
 | BLE range | ~10m indoors | Standard BLE 5.0, no external antenna |
-| Lines of code | ~5,500 | Kotlin (~4,000) + Go (~800) + Rust (~300), excluding stubs |
+| Lines of code | ~6,500 | Kotlin (~5,200) + Go (~950) + Rust (~300) |
 
 ## 2. Component Resource Usage
 
 | Component | RAM (est.) | Storage | CPU Idle | CPU Active |
 |---|---|---|---|---|
-| Kotlin App + BLE Service | ~40 MB | ~1 MB (Room DB) | 3% (BLE scan) | 15% (GATT writes) |
+| Kotlin App + BLE + Power | ~45 MB | ~2 MB (Room DB v4 + telemetry) | 1–3% (mode-dependent) | 15% (GATT writes) |
 | Rust crypto (.so) | ~2 MB | ~300 KB per ABI | 0% | 5% (encrypt/sign) |
 | Go router + BoltDB | ~5 MB | Up to 50 MB (message store) | 1% (janitor) | 10% (routing) |
-| **Total** | **~47 MB** | **~52 MB max** | **~4%** | **~30%** |
+| **Total** | **~52 MB** | **~53 MB max** | **~1–4%** | **~30%** |
 
-## 3. Battery Budget (Estimated)
+## 3. Battery Budget by Power Mode (v0.2.0)
 
-| Activity | Battery Impact |
-|---|---|
-| BLE advertising (always-on) | ~1-2%/hour |
-| BLE scanning (LOW_LATENCY) | ~2-3%/hour |
-| GATT write (per message) | Negligible (~0.01%/message) |
-| Go BoltDB janitor (60s interval) | Negligible |
-| WakeLock (PARTIAL) | ~0.5%/hour |
-| **Estimated daily idle** | **~30-40%/day** |
+v0.2 replaces static continuous scanning with the **PowerPolicyEngine**:
 
-> **Note:** Battery impact varies significantly by device, Android version, and Doze mode behavior. No systematic power profiling has been done yet.
+| Mode | Scan Interval / Window | Adv Interval | WakeLock | Estimated Drain | Intended Scenario |
+|---|---|---|---|---|---|
+| **ACTIVE** | 500ms / 100ms | 100ms | Held (partial) | ~3–4%/hr | Charging or crowded mesh (>10 peers with pending queue) |
+| **ECO** | 2000ms / 100ms | 500ms | Held (partial) | ~1.5–2%/hr | Default walking around mode |
+| **CRITICAL** | 60,000ms / 200ms | 1000ms | **Released** | ~0.5%/hr | Battery < 20%, unplugged. Relay disabled (0.0). |
+| **DEEP_SLEEP** | 300,000ms / 500ms | 2000ms | **Released** | **~0.2%/hr** | Screen off, stationary, no peers for >30m, battery > 20% |
+
+### Message Batching Efficiency
+
+- **Without batching (v0.1.5):** 5 messages = 5 × (connect → MTU negotiation → service discovery → write → disconnect) ≈ **15–20 seconds** of active radio on-time.
+- **With batching (v0.2.0):** 5 messages = 1 connection setup + 5 sequential writes ≈ **4–5 seconds** of active radio on-time.
+- **Gain:** ~70% reduction in radio on-time and GATT connection overhead during burst transmissions.
 
 ## 4. Storage Budget
 

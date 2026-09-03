@@ -1,6 +1,6 @@
 # GHOST Protocol Go Package API Reference
 
-> **Version:** v0.1.5 — reflects actual implemented code in `go/ghostrouter/`.
+> **Version:** v0.2.0 — reflects actual implemented code in `go/ghostrouter/`.
 > The `ghost-economy` and `ghost-mesh` packages described in RFCs do not exist yet.
 
 ## ghostrouter (Implemented)
@@ -47,30 +47,56 @@ func NewRouter(localID []byte, dbPath string, handler DeliverHandler) (*Router, 
 func (r *Router) SendMessage(dst []byte, payload []byte) (*SendResult, error)
 
 // OnPeerDiscovered notifies router that a peer is in BLE range
+// If multiple messages are queued, batches them into a single blob
 // Returns BlobList of messages to send (direct deliveries + spray copies)
 func (r *Router) OnPeerDiscovered(peerID []byte, rssi int) *BlobList
 
 // OnMessageReceived processes incoming routed data
-// Returns: "delivered", "forwarded", "dropped: reason", or "error: reason"
+// Returns: "delivered", "forwarded", "dropped: <reason>", or "error: <details>"
+// Evaluates relayWillingness gate before saving forwarded messages.
 func (r *Router) OnMessageReceived(data []byte) string
 
-// GetStats returns JSON-encoded router statistics
+// SetRelayWillingness sets the relay willingness (0.0 to 1.0)
+// At 0, forwarded messages are dropped (leaf node / low battery).
+// At 1.0, all forwarded messages are accepted for relay.
+func (r *Router) SetRelayWillingness(w float32)
+
+// GetRelayWillingness returns current relay willingness
+func (r *Router) GetRelayWillingness() float32
+
+// GetStats returns JSON-encoded router statistics (includes relayWillingness)
 func (r *Router) GetStats() string
 
 // Stop closes BoltDB and stops background goroutines
-// Helper added in v0.1.5
-func ShortHex(data []byte) string
-
-// Stop closes BoltDB and stops background goroutines
 func (r *Router) Stop()
+
+// EncodeBatch packs multiple encoded messages into a single blob
+func EncodeBatch(encodedMessages [][]byte) ([]byte, error)
+
+// DecodeBatch unpacks a batched blob into individual encoded messages
+func DecodeBatch(data []byte) ([][]byte, error)
+
+// ShortHex returns first 8 hex characters for safe logging
+func ShortHex(data []byte) string
 ```
 
-### Wire Format
+### Wire Formats
 
+#### Single Message Wire Format
 ```
 [4 bytes: header length N, big-endian uint32]
 [N bytes: JSON-encoded RoutingHeader]
 [remaining bytes: encrypted payload (opaque to router)]
+```
+
+#### Batch Wire Format (v0.2.0)
+```
+[1 byte: count N (1-255)]
+[4 bytes: length of msg 1, big-endian uint32]
+[msg1 bytes]
+[4 bytes: length of msg 2, big-endian uint32]
+[msg2 bytes]
+...
 ```
 
 ### RoutingHeader (JSON)
