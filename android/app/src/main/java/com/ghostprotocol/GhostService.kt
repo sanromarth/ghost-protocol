@@ -149,6 +149,7 @@ class GhostService : Service() {
      */
     private fun startPolicyUpdateLoop() {
         serviceScope.launch {
+            var lastAppliedPolicy: com.ghostprotocol.power.PowerPolicy? = null
             var lastMode: PowerMode? = null
             while (isActive) {
                 try {
@@ -170,12 +171,25 @@ class GhostService : Service() {
                         isMoving = null // Motion sensor not implemented yet
                     )
 
-                    // Apply policy to BLE
-                    BleManager.setScanPolicy(policy.scanIntervalMs, policy.scanWindowMs)
-                    BleManager.setAdvertisePolicy(policy.advertiseIntervalMs, policy.txPowerLevel)
+                    // Only update BLE and router when parameters actually change
+                    val prev = lastAppliedPolicy
+                    if (prev == null ||
+                        prev.scanIntervalMs != policy.scanIntervalMs ||
+                        prev.scanWindowMs != policy.scanWindowMs) {
+                        BleManager.setScanPolicy(policy.scanIntervalMs, policy.scanWindowMs)
+                    }
 
-                    // Apply relay willingness to Go router
-                    ghostRouter?.setRelayWillingness(policy.relayWillingness)
+                    if (prev == null ||
+                        prev.advertiseIntervalMs != policy.advertiseIntervalMs ||
+                        prev.txPowerLevel != policy.txPowerLevel) {
+                        BleManager.setAdvertisePolicy(policy.advertiseIntervalMs, policy.txPowerLevel)
+                    }
+
+                    if (prev == null || prev.relayWillingness != policy.relayWillingness) {
+                        ghostRouter?.setRelayWillingness(policy.relayWillingness)
+                    }
+
+                    lastAppliedPolicy = policy
 
                     // Manage WakeLock
                     wakeLock?.let { wl ->
