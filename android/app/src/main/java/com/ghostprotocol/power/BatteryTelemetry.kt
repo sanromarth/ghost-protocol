@@ -84,8 +84,8 @@ class BatteryTelemetry(private val context: Context) {
         )
         getDao().insert(entity)
 
-        // Prune entries older than 48 hours to prevent unbounded growth
-        val cutoff = System.currentTimeMillis() - 48 * 60 * 60 * 1000L
+        // Prune entries older than 7 days to prevent unbounded growth while keeping week-over-week trends
+        val cutoff = System.currentTimeMillis() - 7 * 24 * 60 * 60 * 1000L
         getDao().deleteOlderThan(cutoff)
     }
 
