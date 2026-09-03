@@ -70,9 +70,14 @@ class GhostService : Service() {
     private var messagesForwardedCount: Int = 0
     private var messagesDeliveredCount: Int = 0
 
-    // Dedup for incoming direct BLE messages (content SHA-256 → timestamp)
-    // Prevents duplicate chat bubbles from BLE GATT retries
+    // Dedup for incoming messages based on deterministic Ed25519 signature & content
+    // Prevents duplicate chat bubbles across re-encryptions, retries, and multi-hop spray
     private val recentMessageHashes = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val recentMessageSignatures = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val recentMessageContents = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    // In-flight guard to prevent concurrent deliveries to the same contact
+    private val deliveringContacts = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     // Listen for Bluetooth toggles to restart scanning & advertising automatically
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
@@ -492,18 +497,28 @@ class GhostService : Service() {
                     Log.d(TAG, ">>> NAME UPDATE received from '${senderName}', no message to save")
                     return@launch
                 }
-                // Content-based dedup: prevent duplicate spray deliveries
-                // Hashing ciphertext (which contains unique ephemeral keys and AES nonces)
-                // catches exact packet retransmissions while allowing distinct messages with the same text ("hi" + "hi").
-                val contentHash = MessageDigest.getInstance("SHA-256")
-                    .digest(ciphertext).joinToString("") { "%02x".format(it) }
+                // Content & Signature-based dedup:
+                // Ed25519 signatures are deterministic over (senderPubKey || plaintext).
+                // Multiple deliveries via direct BLE, Go router, and mesh sprays share the identical signature
+                // even when separately encrypted with different ephemeral keys.
+                val sigHex = signature.joinToString("") { "%02x".format(it) }
+                val contentKey = "$senderContactId:$text"
                 val now = System.currentTimeMillis()
-                val lastSeen = recentMessageHashes.put(contentHash, now)
-                if (lastSeen != null && now - lastSeen < 5_000) {
-                    Log.d(TAG, ">>> DEDUP: dropping duplicate routed message from $senderContactId")
+
+                val lastSigSeen = recentMessageSignatures.put(sigHex, now)
+                if (lastSigSeen != null && (now - lastSigSeen < 60_000)) {
+                    Log.d(TAG, ">>> DEDUP: dropping duplicate routed message (signature match) from $senderContactId")
                     return@launch
                 }
-                recentMessageHashes.entries.removeAll { now - it.value > 60_000 }
+
+                val lastContentSeen = recentMessageContents.put(contentKey, now)
+                if (lastContentSeen != null && (now - lastContentSeen < 6_000)) {
+                    Log.d(TAG, ">>> DEDUP: dropping duplicate routed message (content match within 6s) from $senderContactId")
+                    return@launch
+                }
+
+                recentMessageSignatures.entries.removeAll { now - it.value > 120_000 }
+                recentMessageContents.entries.removeAll { now - it.value > 60_000 }
 
                 val message = MessageEntity(
                     id = UUID.randomUUID().toString(),
@@ -578,7 +593,6 @@ class GhostService : Service() {
 
                     val now = System.currentTimeMillis()
                     val lastCall = lastRouterCall[matchedContactId] ?: 0L
-                    val hasPendingRoom = db.messageDao().getSprayedOrPendingForContact(matchedContactId).isNotEmpty()
 
                     // Verification Handshake Check:
                     // If we verified this contact but mutual verification is not recorded yet,
@@ -591,9 +605,17 @@ class GhostService : Service() {
                         sendVerificationPayload(existingContact.copy(bleAddress = peer.address), "$myName\u0000* verified $myName *")
                     }
 
-                    // Throttle only if there are no pending messages to deliver
-                    if (!hasPendingRoom && (now - lastCall < 10_000)) continue
+                    // Throttle peer encounters: minimum 5s between delivery checks per contact.
+                    // In PROTEST mode, scan callbacks arrive every 100-200ms; without this unconditional throttle,
+                    // every scan callback triggers a duplicate delivery while writes are still in flight.
+                    if (now - lastCall < 5_000) continue
                     lastRouterCall[matchedContactId] = now
+
+                    // Prevent concurrent in-flight delivery loops to the same contact
+                    if (!deliveringContacts.add(matchedContactId)) {
+                        Log.d(TAG, ">>> RE-ENCOUNTER: delivery already in flight to '$matchedContactId', skipping concurrent trigger")
+                        continue
+                    }
 
                     // 1. Deliver router multihop/sprayed blobs if available
                     if (ghostRouter != null) {
@@ -611,6 +633,7 @@ class GhostService : Service() {
                                         if (success) {
                                             messagesForwardedCount += count
                                         }
+                                        deliveringContacts.remove(matchedContactId)
                                         Log.d(TAG, ">>> ROUTER BATCH result: ${if (success) "SUCCESS ($count messages)" else "FAILED"}")
                                     }
                                 } else {
@@ -619,55 +642,61 @@ class GhostService : Service() {
                                         if (success) {
                                             messagesForwardedCount++
                                         }
+                                        deliveringContacts.remove(matchedContactId)
                                         Log.d(TAG, ">>> ROUTER SPRAY result: ${if (success) "SUCCESS" else "FAILED"}")
                                     }
                                 }
+                            } else {
+                                deliveringContacts.remove(matchedContactId)
                             }
                         } catch (e: Exception) {
+                            deliveringContacts.remove(matchedContactId)
                             Log.e(TAG, ">>> ROUTER onPeerDiscovered error: ${e.message}")
                         }
-                    }
+                    } else {
+                        // 2. ONLY fallback to Room direct delivery if Go router is NOT active
+                        try {
+                            val pendingRoom = db.messageDao().getSprayedOrPendingForContact(matchedContactId)
+                            if (pendingRoom.isNotEmpty()) {
+                                Log.d(TAG, ">>> RE-ENCOUNTER: Delivering ${pendingRoom.size} delayed/sprayed messages for '${existingContact.name}'")
+                                val contactX25519Pub = Base64.decode(existingContact.x25519PubKey, Base64.NO_WRAP)
+                                val myEd25519PubKey = IdentityManager.getEd25519PubKey()
+                                val myName = IdentityManager.getDisplayName()
 
-                    // 2. Deliver any pending or sprayed messages in Room DB for this contact
-                    try {
-                        val pendingRoom = db.messageDao().getSprayedOrPendingForContact(matchedContactId)
-                        if (pendingRoom.isNotEmpty()) {
-                            Log.d(TAG, ">>> RE-ENCOUNTER: Delivering ${pendingRoom.size} delayed/sprayed messages for '${existingContact.name}'")
-                            val contactX25519Pub = Base64.decode(existingContact.x25519PubKey, Base64.NO_WRAP)
-                            val myEd25519PubKey = IdentityManager.getEd25519PubKey()
-                            val myName = IdentityManager.getDisplayName()
-
-                            for (msg in pendingRoom) {
-                                val wireText = if (msg.replyToText != null) {
-                                    "$myName\u0000REPLY\u0000${msg.replyToSender ?: ""}\u0000${msg.replyToText}\u0000${msg.content}"
-                                } else {
-                                    "$myName\u0000${msg.content}"
-                                }
-                                val plaintextBytes = wireText.toByteArray(Charsets.UTF_8)
-                                val payload = myEd25519PubKey + plaintextBytes
-                                val signature = GhostCrypto.sign(IdentityManager.getEd25519Seed(), payload)
-                                val fullPayload = payload + signature
-                                val ciphertext = GhostCrypto.encrypt(contactX25519Pub, fullPayload)
-
-                                val success = kotlinx.coroutines.suspendCancellableCoroutine<Boolean> { cont ->
-                                    BleManager.sendMessage(peer.address, ciphertext) { ok ->
-                                        if (cont.isActive) cont.resume(ok)
+                                for (msg in pendingRoom) {
+                                    val wireText = if (msg.replyToText != null) {
+                                        "$myName\u0000REPLY\u0000${msg.replyToSender ?: ""}\u0000${msg.replyToText}\u0000${msg.content}"
+                                    } else {
+                                        "$myName\u0000${msg.content}"
                                     }
-                                }
+                                    val plaintextBytes = wireText.toByteArray(Charsets.UTF_8)
+                                    val payload = myEd25519PubKey + plaintextBytes
+                                    val signature = GhostCrypto.sign(IdentityManager.getEd25519Seed(), payload)
+                                    val fullPayload = payload + signature
+                                    val ciphertext = GhostCrypto.encrypt(contactX25519Pub, fullPayload)
 
-                                if (success) {
-                                    messagesForwardedCount++
-                                    db.messageDao().updateStatus(msg.id, MessageEntity.STATUS_SENT)
-                                    Log.d(TAG, ">>> DELIVERED delayed message ${msg.id} to '${existingContact.name}'")
-                                } else {
-                                    Log.e(TAG, ">>> FAILED to deliver delayed message ${msg.id} to ${peer.address}")
-                                    break // Stop loop on failure to allow retry on next encounter
+                                    val success = kotlinx.coroutines.suspendCancellableCoroutine<Boolean> { cont ->
+                                        BleManager.sendMessage(peer.address, ciphertext) { ok ->
+                                            if (cont.isActive) cont.resume(ok)
+                                        }
+                                    }
+
+                                    if (success) {
+                                        messagesForwardedCount++
+                                        db.messageDao().updateStatus(msg.id, MessageEntity.STATUS_SENT)
+                                        Log.d(TAG, ">>> DELIVERED delayed message ${msg.id} to '${existingContact.name}'")
+                                    } else {
+                                        Log.e(TAG, ">>> FAILED to deliver delayed message ${msg.id} to ${peer.address}")
+                                        break
+                                    }
+                                    delay(300L)
                                 }
-                                delay(300L) // Yield between successive GATT writes
                             }
+                        } catch (e: Exception) {
+                            Log.e(TAG, ">>> Error delivering Room messages to '${existingContact.name}': ${e.message}")
+                        } finally {
+                            deliveringContacts.remove(matchedContactId)
                         }
-                    } catch (e: Exception) {
-                        Log.e(TAG, ">>> Error delivering Room messages to '${existingContact.name}': ${e.message}")
                     }
                 }
             }
@@ -813,19 +842,27 @@ class GhostService : Service() {
                 Log.d(TAG, ">>> NAME UPDATE received from '${senderName}', no message to save")
                 return
             }
-            // Content-based dedup: prevent duplicate messages from BLE GATT retries
-            // Hashing the received encrypted data ensures GATT packet retries are dropped
-            // without dropping separate user messages with the same text.
-            val contentHash = MessageDigest.getInstance("SHA-256")
-                .digest(data).joinToString("") { "%02x".format(it) }
+            // Content & Signature-based dedup:
+            // Ed25519 signatures are deterministic over (senderPubKey || plaintext).
+            // Retransmissions and parallel direct/routed deliveries share the identical signature.
+            val sigHex = signature.joinToString("") { "%02x".format(it) }
+            val contentKey = "$senderContactId:$text"
             val now = System.currentTimeMillis()
-            val lastSeen = recentMessageHashes.put(contentHash, now)
-            if (lastSeen != null && now - lastSeen < 5_000) {
-                Log.d(TAG, ">>> DEDUP: dropping duplicate direct message from $senderContactId")
+
+            val lastSigSeen = recentMessageSignatures.put(sigHex, now)
+            if (lastSigSeen != null && (now - lastSigSeen < 60_000)) {
+                Log.d(TAG, ">>> DEDUP: dropping duplicate direct message (signature match) from $senderContactId")
                 return
             }
-            // Evict old entries (older than 60s) to prevent unbounded growth
-            recentMessageHashes.entries.removeAll { now - it.value > 60_000 }
+
+            val lastContentSeen = recentMessageContents.put(contentKey, now)
+            if (lastContentSeen != null && (now - lastContentSeen < 6_000)) {
+                Log.d(TAG, ">>> DEDUP: dropping duplicate direct message (content match within 6s) from $senderContactId")
+                return
+            }
+
+            recentMessageSignatures.entries.removeAll { now - it.value > 120_000 }
+            recentMessageContents.entries.removeAll { now - it.value > 60_000 }
 
             val message = MessageEntity(
                 id = UUID.randomUUID().toString(),
