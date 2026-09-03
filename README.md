@@ -114,6 +114,8 @@ v0.1.5 resolved 67 internal audit issues (FFI panics, mutex deadlocks, GATT leak
 
 - [Whitepaper](docs/whitepaper.md) — protocol design and security analysis
 - [v0.1 Status](docs/GHOST-v0.1-Status.md) — baseline audit & status report
+- [v0.2 Status](docs/GHOST-v0.2-Status.md) — battery power system & GATT batching status
+- [v0.3 Protest Mode Spec](docs/GHOST-v0.3-Roadmap-ProtestMode.md) — frictionless nearby discovery & short codes
 - [Changelog](CHANGELOG.md) — version history
 - [System Architecture](docs/architecture/system-diagram.md) — component diagram
 - [API Reference](docs/api/) — Go, Kotlin, Rust module APIs
@@ -122,12 +124,14 @@ v0.1.5 resolved 67 internal audit issues (FFI panics, mutex deadlocks, GATT leak
 
 ## Roadmap
 
-| Version | What |
-|---------|------|
-| v0.1 ✓ | BLE messaging, E2E crypto, Spray-and-Wait, Compose UI |
-| v0.2 ✓ | Message batching, PowerPolicyEngine, relay willingness gate, telemetry |
-| v0.3 | Group chat, delivery receipts, file transfer, WiFi Direct |
-| v1.0 | Post-quantum crypto, cover traffic, identity recovery |
+| Version | Milestone | Key Deliverables |
+|---|---|---|
+| **v0.1 ✓** | Core Mesh Alpha | BLE direct messaging, Noise/X25519 E2E crypto, Spray-and-Wait DTN routing, Compose dark UI |
+| **v0.2 ✓** | Power & Reliability | PowerPolicyEngine, Battery Telemetry, GATT batching, DTN re-encounter delivery, BitChat mutual QR |
+| **v0.2.5** | Trust Web | Contact Introductions (friend-of-a-friend signed vouching envelopes) |
+| **v0.3** | Protest Mode & Groups | Nearby BLE discovery (one-tap mutual consent), 24h rotating BIP-39 short codes, delivery receipts (`✔✔`), multi-peer group chat |
+| **v0.4** | Survival Broadcast | Channel 0 Emergency Public Broadcast (unencrypted localized alert bursts), WiFi Direct high-bandwidth transport |
+| **v1.0** | Cypherpunk Production | Post-quantum Kyber/Dilithium hybrid crypto, Sphinx cover traffic, biometric Shamir identity recovery |
 
 ## License
 
