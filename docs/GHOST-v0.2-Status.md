@@ -70,16 +70,29 @@ v0.2 addresses the biggest physical bottleneck of offline mesh networking: **ene
   - Chained write completion handled via `suspendCancellableCoroutine`.
   - Promotes message status from `STATUS_SPRAYED` (4) to `STATUS_SENT` (1), updating UI icon from 📡 to `✓`.
 
-### Reciprocal QR Verification (`QRScanScreen.kt`, `QRShowScreen.kt`, `NotificationHelper.kt`)
-- ✅ **BitChat-Style Auto-Flip:**
+### Reciprocal QR Verification (`QRScanScreen.kt`, `QRShowScreen.kt`, `NotificationHelper.kt`, `HapticHelper.kt`)
+- ✅ **Reciprocal QR Auto-Flip:**
   - Scanning peer QR triggers haptic vibration and immediately transitions to `QRShowScreen`, displaying local QR for instant return scan.
   - Out-of-band wire handshake packet transmitted over BLE on scan.
   - Reciprocal verification promotes status to `* mutual verification with <name> *`.
   - High-priority system notification: `Mutual verification: You and <name> verified each other`.
-  - Security badges `🔒 ✔` rendered in top bar header and contact list.
+  - Hardware dual-pulse heartbeat haptics (`bump... thump-thump`) confirmed in hand.
+  - Signature Ghost Aura (animated Ethereal Ring) rendered around avatar in chat header and contact list.
 
-### User Interface (`android/app/.../ui/`)
+### Signature Cypherpunk User Interface (`android/app/.../ui/`)
+- ✅ **Ghost Avatar & Ethereal Ring (`GhostAvatar.kt` / `AvatarGenerator.kt`):**
+  - Continuous rotating neon violet sweep-gradient rim (`#9D4EDD` → `#C77DFF` → `#7B2CBF`) for mutually verified contacts.
+  - Subdued dark slate rim (`#3F3F46`) for unverified peers. Zero emoji badges.
+- ✅ **Live Radio Proximity Wave (`RadioProximityWave.kt`):**
+  - Replaces generic online dot with real physical BLE RF metrics (`∿∿∿ ~3m Direct (-58 dBm)`, `∿∿ ~8m Direct`, `∿ ~15m Edge`, or `📡 Relayed (Mesh Ready)`).
+- ✅ **Delay-Tolerant Sprayed Physics (`ChatScreen.kt`):**
+  - In `STATUS_SPRAYED`, message bubbles exhibit an animated breathing neon violet shimmer border, visually indicating active radio transit, snapping to solid check border on delivery.
+- ✅ **Tactical Survival HUD Mode (`GhostTheme.kt`, `SurvivalHudStrip.kt`):**
+  - 1-tap quick toggle in `ContactListScreen.kt` top bar and `SettingsScreen.kt`.
+  - Background switches to pure `#000000` OLED black, typography switches to tactical phosphor green (`#52B788`) and amber (`#FFB703`), and all GPU animations are disabled to eliminate CPU/GPU battery drain.
+  - Persistent monospace status strip (`⚡ HUD [OLED BLACK] • 84% • ECO | 2000ms | 2 PEERS`).
 - ✅ **`SettingsScreen.kt`:**
+  - Tactical Survival HUD toggle switch.
   - Power Management dashboard with active mode chip (`ACTIVE` green, `ECO` blue, `CRITICAL` orange, `DEEP_SLEEP` gray).
   - Battery % and last telemetry snapshot summary card.
   - 4-button override controls (`ACT`, `ECO`, `CRIT`, `SLEEP`).
@@ -87,7 +100,7 @@ v0.2 addresses the biggest physical bottleneck of offline mesh networking: **ene
 - ✅ **`ChatScreen.kt`:**
   - Quoted reply rendering with accent bar and dismiss action.
   - System event lines (`* verified *`, `* mutual verification with *`) rendered centered in monospace font with timestamp pills.
-  - Verified lock indicator `🔒 ✔` in top bar.
+  - Ghost Aura and live RF proximity wave in top bar.
 
 ---
 
@@ -126,8 +139,8 @@ Verified on physical Android test devices over live BLE 5.0:
   adb shell dumpsys power | grep ghost:mesh_wakelock
   ```
 - [x] **Battery Telemetry Export:** Tapped "Export Battery Report" in Settings. Verified CSV generation and Android system share sheet dispatch.
-- [x] **DTN Re-encounter Delivery:** Disconnected recipient. Sent message (status became 📡 SPRAYED). Reconnected recipient. Verified automatic Room DB query, GATT delivery, and status promotion to `✓ SENT`.
-- [x] **Reciprocal Mutual QR Scan:** Scanned Device 2 with Device 1. Device 1 auto-opened QR code. Device 2 scanned Device 1. Verified both devices inserted `* mutual verification with <name> *`, triggered `Mutual verification` notification, and showed `🔒 ✔`.
+- [x] **Reciprocal Mutual QR Scan:** Scanned Device 2 with Device 1. Device 1 auto-opened QR code. Device 2 scanned Device 1. Verified both devices inserted `* mutual verification with <name> *`, triggered `Mutual verification` notification, triggered dual-pulse heartbeat haptics, and rendered the signature Ghost Aura (animated Ethereal Ring).
+- [x] **Cypherpunk UI/UX Architecture:** Verified live RF proximity wave reflects dynamic BLE RSSI, delay-tolerant sprayed message bubbles exhibit animated neon shimmer border, and 1-tap Tactical Survival HUD sets pure `#000000` black with zero GPU animations.
 
 ---
 

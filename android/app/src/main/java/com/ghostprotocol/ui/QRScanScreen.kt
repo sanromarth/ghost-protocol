@@ -236,7 +236,7 @@ fun QRScanScreen(navController: NavController) {
                                                                         e.printStackTrace()
                                                                     }
 
-                                                                    // Automatic transition: like Bitchat, immediately open your QR code so the other device can scan back!
+                                                                    // Automatic reciprocal transition: immediately open your QR code so the other device can scan back!
                                                                     scope.launch(Dispatchers.Main) {
                                                                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                                                         android.widget.Toast.makeText(context, "Verified $name! Showing your QR code...", android.widget.Toast.LENGTH_SHORT).show()

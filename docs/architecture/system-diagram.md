@@ -157,7 +157,7 @@ sequenceDiagram
     B->>A: Transmits mutual verification ACK over BLE
     A->>A: Room DB: Inserts "* mutual verification with B *"
     A->>A: High-priority notification: "Mutual verification: You and B verified each other"
-    Note over A,B: Both devices display green 🔒 ✔ security badge
+    Note over A,B: Both devices trigger heartbeat haptics and activate the signature Ghost Aura (animated Ethereal Ring)
 ```
 
 ## 9. Deployment Model

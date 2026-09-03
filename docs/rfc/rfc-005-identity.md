@@ -103,7 +103,7 @@ stateDiagram-v2
 ### 12.1 Out-of-Band Key Exchange (Zero-TOFU)
 - **Primary Mechanism:** In-person cryptographic QR scan.
 - **Wire Format:** `GHOST:<Base64(Ed25519PublicKey(32) || X25519PublicKey(32) || DisplayName(UTF-8))>`
-- **Reciprocal Verification:** Scanning peer QR automatically transitions local device to show QR code for reciprocal return scan. Both devices exchange signed wire packets over BLE, entering `MutuallyVerified` state (`🔒 ✔`).
+- **Reciprocal Verification:** Scanning peer QR automatically transitions local device to show QR code for reciprocal return scan. Both devices exchange signed wire packets over BLE, entering `MutuallyVerified` state (activating the signature Ghost Aura / Ethereal Ring on the peer's avatar).
 
 ### 12.2 Protest Mode Discovery (v0.3 Specification)
 - **Nearby One-Tap Consent:** Discovered BLE 4-byte fingerprints trigger high-priority prompts. One-tap approval initiates mutual GATT key bundle exchange in <3 seconds without cameras.

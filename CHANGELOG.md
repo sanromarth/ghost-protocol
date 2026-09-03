@@ -22,11 +22,17 @@ Major release focusing on physical battery efficiency, delay-tolerant mesh deliv
   - SQLite snapshot logging (`telemetry_snapshots`) recording 15 runtime metrics every 60s (temperatures, GATT connection counters, TX/RX byte counts, CPU wakeups, scan runtimes).
   - 48-hour rolling retention pruning.
   - One-tap CSV export via Android `FileProvider` and system share sheet.
-- **BitChat-Style Reciprocal QR Verification:**
-  - Scanning a peer's QR code triggers haptic feedback and automatically opens `QRShowScreen` on the scanner's device so the peer can scan back without touching navigation buttons.
+- **Reciprocal Mutual QR Verification:**
+  - Scanning a peer's QR code triggers haptic feedback and automatically transitions to `QRShowScreen` on the scanner's device so the peer can scan back without touching navigation buttons.
   - Wire-level verification handshake: transmits signed verification payload over BLE upon scan.
-  - When reciprocal scan or handshake completes, inserts `* mutual verification with <name> *` system event, fires high-priority Android system notification (`Mutual verification: You and <name> verified each other`), and renders green `🔒 ✔` security badges in the chat header and contact list.
+  - When reciprocal scan or handshake completes, inserts `* mutual verification with <name> *` system event, fires high-priority Android system notification (`Mutual verification: You and <name> verified each other`), triggers hardware dual-pulse heartbeat haptics, and activates the signature Ghost Aura (animated Ethereal Ring) around the contact's avatar.
   - In-chat system events rendered as centered, monospace log lines with bracketed timestamps (`[HH:mm:ss]`).
+- **Signature Cypherpunk UI/UX Architecture:**
+  - **Ghost Aura / Ethereal Ring:** Replaced generic emoji badges with an animated neon violet sweep-gradient rim (`#9D4EDD` → `#C77DFF` → `#7B2CBF`) surrounding avatars of mutually verified peers. Clean dark slate rim (`#3F3F46`) for unverified peers.
+  - **Live Radio Proximity Wave:** Replaced generic green internet dots with live physical BLE RF signal metrics (`∿∿∿ ~3m Direct (-58 dBm)`, `∿∿ ~8m Direct (-72 dBm)`, `∿ ~15m Edge (-84 dBm)`, or `📡 Relayed (Mesh Ready)` when out of direct range).
+  - **Dual-Pulse Heartbeat Haptic Verification:** Visceral `bump... thump-thump` double-pulse vibration waveform (35ms bump, 90ms pause, 75ms max-power thump) confirming cryptographic mutual verification directly into the user's palm.
+  - **Delay-Tolerant Sprayed Physics:** Message bubbles in `STATUS_SPRAYED` display an animated breathing neon violet shimmer border, visually indicating active radio transit, snapping to a solid check border upon delivery.
+  - **Tactical Survival HUD Mode:** 1-tap quick toggle turning the entire UI into true `#000000` OLED black, switching typography to tactical high-contrast phosphor green (`#52B788`) and amber (`#FFB703`), completely disabling GPU animations to conserve battery, and displaying a top persistent telemetry strip (`⚡ HUD [OLED BLACK] • 84% • ECO | 2000ms | 2 PEERS`).
 - **Quoted Reply Envelope Protocol:** Wire format parses `\u0000REPLY\u0000<quotedSender>\u0000<quotedText>\u0000<bodyText>`, persisting `replyToSender` and `replyToText` in Room DB. Backward-compatible with non-quoted messages.
 
 ### Fixed
@@ -145,7 +151,7 @@ Premium interactions:
 - **README.md** — Rewritten with honest feature list, 3-command quick start, architecture table, roadmap
 - **CHANGELOG.md** — Updated with v0.1.4 entry
 
-### 🔒 Background Service Resilience
+### Background Service Resilience
 
 - `PARTIAL_WAKE_LOCK` in GhostService — keeps CPU alive during BLE operations
 - Battery optimization exclusion popup in MainActivity

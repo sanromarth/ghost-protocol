@@ -12,9 +12,9 @@ GHOST (Global Hybrid Offline Secure Transport) is an offline mesh messaging syst
 
 Messages are routed through a Spray-and-Wait epidemic routing engine implemented in Go with BoltDB persistence, enabling multi-hop delay-tolerant delivery through intermediate relay nodes when peers are out of direct radio range. Contacts are established via cryptographic QR codes with reciprocal mutual verification.
 
-**v0.2.0 introduces physical power-aware mesh management**: a centralized `PowerPolicyEngine` dynamically governing BLE duty cycles across 4 operating modes (ACTIVE, ECO, CRITICAL, DEEP_SLEEP), single-session GATT message batching (cutting connection overhead by ~70%), relay willingness shedding on dying batteries (<20%), persistent SQLite battery telemetry with CSV export, and BitChat-style reciprocal QR mutual verification.
+**v0.2.0 introduces physical power-aware mesh management and signature cypherpunk UI/UX**: a centralized `PowerPolicyEngine` dynamically governing BLE duty cycles across 4 operating modes (ACTIVE, ECO, CRITICAL, DEEP_SLEEP), single-session GATT message batching (cutting connection overhead by ~70%), relay willingness shedding on dying batteries (<20%), persistent SQLite battery telemetry with CSV export, reciprocal QR mutual verification with hardware heartbeat haptics, the signature Ghost Aura (animated Ethereal Ring), live RF proximity waves, and a 1-tap true #000000 OLED Tactical Survival HUD.
 
-The codebase is approximately 6,800 lines across three languages: Kotlin (UI, BLE, Power, Room DB), Rust (cryptography via JNI), and Go (mesh routing via gomobile). The debug APK is 46 MB and runs on Android 8.0+ devices with zero Google Play Services dependencies. All core capabilities are verified across physical Android devices.
+The codebase is approximately 8,400 lines across three languages: Kotlin (6.3k LOC: UI, BLE, Power, Room DB), Go (1.7k LOC: mesh routing via gomobile), and Rust (0.3k LOC: cryptography via JNI). The debug APK is 46 MB and runs on Android 8.0+ devices with zero Google Play Services dependencies. All core capabilities are verified across physical Android devices.
 
 ---
 
@@ -162,12 +162,12 @@ QR payload format:
 GHOST:<Base64(ed25519_pub(32) + x25519_pub(32) + name_utf8)>
 ```
 
-**BitChat-Style Reciprocal Flow:**
+**Reciprocal Mutual Verification Flow:**
 1. Device A scans Device B's QR code.
 2. Device A decodes keys, saves B into Room DB with `isVerified = true`.
 3. Device A emits haptic feedback, displays a toast, and **automatically navigates to `QRShowScreen`**, presenting Device A's QR code so Device B can scan back without delay.
 4. Device A transmits a signed verification packet over BLE to Device B.
-5. When reciprocal scan or handshake is confirmed, both devices insert `* mutual verification with <name> *`, trigger an Android system notification, and display the green verified badge `🔒 ✔` in chat and contact lists.
+5. When reciprocal scan or handshake is confirmed, both devices insert `* mutual verification with <name> *`, trigger an Android system notification, emit hardware dual-pulse heartbeat haptics, and activate the signature Ghost Aura (animated Ethereal Ring) around the contact's avatar in chat and contact lists.
 
 ### 3.3 End-to-End Encryption
 
@@ -190,13 +190,18 @@ Every message is encrypted and signed using three cryptographic primitives:
 [remaining: encrypted payload]
 ```
 
-**Implementation:** 6 Compose screens, ~1,100 lines total
+### 3.5 Cypherpunk User Interface Architecture
 
-- **Contact list:** GHOST branding, pill search bar, avatar with online indicator, stacked FABs
-- **Chat:** Purple gradient sent bubbles, dark gray received, message grouping, time headers, inline status icons, animated send/receive
-- **QR Show/Scan:** CameraX real-time scanning with ML Kit
-- **Settings:** Identity display, QR code, battery debug, delete all data
-- **Username setup:** First-launch screen
+**Implementation:** 10 Compose screens and tactical components, ~3,500 lines total
+
+- **Ghost Aura / Ethereal Ring:** Replaced emoji badges with an animated neon violet sweep-gradient rim (`#9D4EDD` → `#C77DFF` → `#7B2CBF`) on mutually verified peers' avatars. Subdued dark slate rim (`#3F3F46`) for unverified peers.
+- **Live Radio Proximity Wave:** Physical BLE signal strength meter (`∿∿∿ ~3m Direct (-58 dBm)`, `∿∿ ~8m Direct`, `∿ ~15m Edge`, or `📡 Relayed (Mesh Ready)`).
+- **Dual-Pulse Heartbeat Haptics:** Visceral double-pulse (`bump... thump-thump`) confirmation on reciprocal verification.
+- **Delay-Tolerant Message Physics:** Pulsing neon violet shimmer border on messages in `STATUS_SPRAYED` radio transit, snapping to solid check border on delivery.
+- **Tactical Survival HUD:** 1-tap toggle to true `#000000` OLED black, disabling animations to eliminate GPU wakeups, high-contrast phosphor green accents (`#52B788`), and persistent telemetry strip.
+- **Chat & Gestures:** Swipe-to-reply with inline quotes, gradient message bubbles, and bottom action sheets.
+- **QR Show/Scan:** CameraX real-time scanning with automatic reciprocal return flip.
+- **Settings & Telemetry:** Dynamic power mode indicators, 1-hour manual overrides, and CSV telemetry export.
 
 **Message status indicators:**
 | Icon | Status | Meaning |
@@ -204,7 +209,7 @@ Every message is encrypted and signed using three cryptographic primitives:
 | ⏳ | PENDING | Encrypting / BLE connecting |
 | ✓ | SENT | GATT write confirmed by BLE stack |
 | ✓✓ | DELIVERED | Reserved for future delivery receipts |
-| 📡 | SPRAYED | Queued in Go router for relay delivery |
+| 📡 (pulsing shimmer) | SPRAYED | Queued in DTN store-and-forward transit |
 | ⚠ | FAILED | BLE write failed |
 
 ---
@@ -289,7 +294,7 @@ GHOST v0.2.0's security is appropriate for:
 | Custom username | Yes | Yes | Yes | No (pubkey only) |
 | Deterministic avatar | Yes (SHA-256 color) | No | No | No |
 | Open source | Yes | Yes | No | Yes |
-| Lines of code | **~6,800** | ~60,000 | Proprietary | ~3,000 |
+| Lines of code | **~8,400** | ~60,000 | Proprietary | ~3,000 |
 | Google Play required | **No** | No | Yes | No |
 
 ### 6.2 Honest Assessment
@@ -298,7 +303,8 @@ GHOST v0.2.0's security is appropriate for:
 - Three-language architecture (Rust crypto, Go routing, Kotlin UI) provides clean separation of concerns and crash isolation across FFI.
 - PowerPolicyEngine with 4 dynamic operating modes and single-session GATT batching reduces radio on-time by ~70%, preventing the battery drain that plagued earlier mesh messengers.
 - Delay-tolerant store-and-forward re-encounter delivery ensures pending messages are reliably flushed when peers re-enter radio range.
-- BitChat-style reciprocal QR verification provides seamless two-way mutual verification without manual screen switching.
+- Reciprocal QR mutual verification provides seamless two-way verification without manual screen switching, reinforced by physical dual-pulse heartbeat haptics and the signature Ghost Aura (animated Ethereal Ring).
+- Tactical Survival HUD cuts battery consumption to bare minimums using true #000000 OLED rendering and zero GPU animations.
 
 **Where competitors win:**
 - **Briar** has double ratchet session state, group forums, and years of field audits.
@@ -320,13 +326,14 @@ GHOST v0.2.0's security is appropriate for:
 
 ## 8. Future Work & Roadmap
 
-### v0.2.0 — Power & Reliability (Completed)
+### v0.2.0 — Power, Reliability & Cypherpunk UI (Completed)
 - PowerPolicyEngine with 4 dynamic modes (ACTIVE, ECO, CRITICAL, DEEP_SLEEP)
 - Single-session GATT message batching (~70% radio time reduction)
 - Relay willingness load shedding on dying batteries (<20%)
 - Battery & mesh telemetry with SQLite logging and CSV export
 - DTN store-and-forward automatic re-encounter delivery
-- BitChat-style reciprocal QR scanning and mutual verification (`🔒 ✔`)
+- Reciprocal QR scanning with Ethereal Ring mutual verification and heartbeat haptics
+- Signature Cypherpunk UI/UX: live RF proximity waves, delay-tolerant message shimmer physics, and 1-tap OLED Tactical Survival HUD
 
 ### v0.2.5 — Trust Web
 - Contact Introductions: Alice introduces Bob to Carol via signed cryptographic introduction envelope

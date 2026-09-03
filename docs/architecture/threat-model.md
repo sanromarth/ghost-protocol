@@ -33,7 +33,7 @@
 - **Ed25519 digital signatures:** Authenticates sender and prevents payload tampering.
 - **AEAD authentication tag:** Bit-flip attacks detected by GCM.
 - **Zero-TOFU QR Exchange:** Cryptographic identity exchanged in-person.
-- **Reciprocal Mutual Verification:** BitChat-style two-way verification confirms both parties scanned each other before granting verified badge `🔒 ✔`.
+- **Reciprocal Mutual Verification:** Two-way verification confirms both parties scanned each other before activating the signature Ghost Aura (animated Ethereal Ring) on the peer's avatar.
 
 ## 3. What v0.2.0 Does NOT Protect
 

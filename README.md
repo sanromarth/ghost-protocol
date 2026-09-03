@@ -44,8 +44,9 @@ Most "offline" messengers rely on theoretical whitepapers, proprietary ciphers, 
 - **Message batching** — multi-message bundling into single GATT connections with sequential write-chaining
 - **Battery-aware power policy** — 4 dynamic power modes (ACTIVE, ECO, CRITICAL, DEEP_SLEEP), wake lock management, and relay willingness gating
 - **Battery telemetry** — SQLite/Room snapshot logging with CSV export for empirical power profiling
-- **QR key exchange** — scan a code to add a contact, no accounts or servers involved
-- **Swipe-to-reply UI** — Compose-based chat with gesture support, online status via BLE proximity
+- **Reciprocal QR key exchange** — scan a code to add a contact, automatic reciprocal return scan, zero servers
+- **Cypherpunk UI/UX** — Ghost Aura (animated Ethereal Ring), live RF proximity waves (`∿∿∿ ~3m`), heartbeat haptic confirmation, delay-tolerant message shimmer physics, and 1-tap true `#000000` OLED Survival HUD
+- **Swipe-to-reply UI** — Compose-based chat with gesture support and in-line reply previews
 - **Offline-first** — works with zero network, no Google Play Services needed
 
 ## Quick start
@@ -107,14 +108,14 @@ v0.1.5 resolved 67 internal audit issues (FFI panics, mutex deadlocks, GATT leak
 | Cold start | ~1.5s |
 | BLE message latency | 2–4s direct |
 | BLE range | ~10m indoors |
-| Lines of code | ~6,500 |
+| Lines of code | ~8,400 (Kotlin: 6.3k, Go: 1.7k, Rust: 0.3k) |
 | Go unit tests | 15/15 passing |
 
 ## Docs
 
 - [Whitepaper](docs/whitepaper.md) — protocol design and security analysis
 - [v0.1 Status](docs/GHOST-v0.1-Status.md) — baseline audit & status report
-- [v0.2 Status](docs/GHOST-v0.2-Status.md) — battery power system & GATT batching status
+- [v0.2 Status](docs/GHOST-v0.2-Status.md) — battery power system, GATT batching, & cypherpunk UI status
 - [v0.3 Protest Mode Spec](docs/GHOST-v0.3-Roadmap-ProtestMode.md) — frictionless nearby discovery & short codes
 - [Changelog](CHANGELOG.md) — version history
 - [System Architecture](docs/architecture/system-diagram.md) — component diagram
@@ -127,9 +128,9 @@ v0.1.5 resolved 67 internal audit issues (FFI panics, mutex deadlocks, GATT leak
 | Version | Milestone | Key Deliverables |
 |---|---|---|
 | **v0.1 ✓** | Core Mesh Alpha | BLE direct messaging, Noise/X25519 E2E crypto, Spray-and-Wait DTN routing, Compose dark UI |
-| **v0.2 ✓** | Power & Reliability | PowerPolicyEngine, Battery Telemetry, GATT batching, DTN re-encounter delivery, BitChat mutual QR |
+| **v0.2 ✓** | Power & Reliability | PowerPolicyEngine, Battery Telemetry, GATT batching, DTN re-encounter delivery, Reciprocal mutual QR, Ethereal Ring, Survival HUD |
 | **v0.2.5** | Trust Web | Contact Introductions (friend-of-a-friend signed vouching envelopes) |
-| **v0.3** | Protest Mode & Groups | Nearby BLE discovery (one-tap mutual consent), 24h rotating BIP-39 short codes, delivery receipts (`✔✔`), multi-peer group chat |
+| **v0.3** | Protest Mode & Groups | Nearby BLE discovery (one-tap mutual consent), 24h rotating BIP-39 short codes, delivery receipts, multi-peer group chat |
 | **v0.4** | Survival Broadcast | Channel 0 Emergency Public Broadcast (unencrypted localized alert bursts), WiFi Direct high-bandwidth transport |
 | **v1.0** | Cypherpunk Production | Post-quantum Kyber/Dilithium hybrid crypto, Sphinx cover traffic, biometric Shamir identity recovery |
 
