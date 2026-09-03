@@ -50,15 +50,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        IdentityManager.init(this)
         if (checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED) {
             startGhostService()
-            com.ghostprotocol.ble.BleManager.setLocalFingerprint(IdentityManager.getFingerprint())
-            com.ghostprotocol.ble.BleManager.start(applicationContext)
+            try {
+                com.ghostprotocol.ble.BleManager.setLocalFingerprint(IdentityManager.getFingerprint())
+                com.ghostprotocol.ble.BleManager.start(applicationContext)
+            } catch (e: Exception) {
+                android.util.Log.e("MainActivity", "Error starting BleManager in onResume: ${e.message}")
+            }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        IdentityManager.init(this)
 
         // Edge-to-edge
         WindowCompat.setDecorFitsSystemWindows(window, false)
