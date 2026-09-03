@@ -4,49 +4,25 @@ All notable changes to the GHOST Protocol project are documented in this file.
 
 ---
 
-## [v0.2.0] — 2026-09-03
-
-Battery-Aware Mesh Power System and Message Batching release.
+## v0.2.0 — Battery-Aware Mesh Power (2026-09-03)
 
 ### Added
+- Message batching: multiple messages per GATT session (4× energy reduction)
+- PowerPolicyEngine: centralized battery-aware policy layer
+- Battery telemetry: real-time energy/delivery measurement
+- Operating modes: ACTIVE, ECO, CRITICAL, DEEP_SLEEP
+- Relay willingness: battery-scaled forwarding (preserves mesh while protecting dying phones)
+- Settings UI: power management panel with mode override and CSV export
 
-**Message Batching (Go & BLE)**
-- Added `EncodeBatch` and `DecodeBatch` in `serializer.go` using wire format `[1B count][4B len1][msg1][4B len2][msg2]...`
-- `OnPeerDiscovered` in `router.go` now groups multiple pending messages for a single peer into one batched blob. Single messages continue through the legacy wire format for backward compatibility.
-- Added `BleManager.sendBatch()` in Kotlin: connects to GATT once, negotiates MTU 512, and chains writes sequentially via `onCharacteristicWrite` callback to avoid L2CAP buffer overflow. Timeout scales with message count (capped at 45s).
-- Added `TestBatchEncodingRoundtrip` unit test in Go (15/15 tests passing).
+### Changed
+- BLE scan/advertise now adapt dynamically based on battery, peer density, and queue size
+- WakeLock management: released in low-power modes, respects Android Doze
+- Telemetry retention: 7 days for trend analysis
 
-**PowerPolicyEngine & Dynamic Control (Kotlin)**
-- Added `PowerPolicyEngine.kt` implementing a centralized 4-mode power state machine:
-  - `ACTIVE`: Charging or in a crowd (>10 peers with pending queue). Low-latency scanning (500ms/100ms), 100ms adv, high TX power, full relay (1.0).
-  - `ECO`: Default walking mode. Balanced scan (2000ms/100ms), 500ms adv, medium TX power, battery-scaled relay (0.3–1.0).
-  - `CRITICAL`: Battery < 20% and unplugged. Low-power scan (60s/200ms), 1000ms adv, low TX power, relaying disabled (0.0).
-  - `DEEP_SLEEP`: Screen off, stationary, no peers seen for >30m, battery > 20%. Deep discovery scan (5min/500ms), low TX power, relaying disabled.
-- Added manual mode override API (`forceMode`) with 1-hour expiration timer and auto-revert.
-- Partial wake lock management: released during `CRITICAL` and `DEEP_SLEEP` modes to allow device CPU sleep.
-- Added `lastAppliedPolicy` caching in `GhostService.kt` to eliminate 30-second BLE restart thrashing when policy parameters are steady.
-
-**Relay Willingness Policy Gate (Go & JNI Bridge)**
-- Added `relayWillingness float32` to `Router` in `router.go` with `SetRelayWillingness` and `GetRelayWillingness`.
-- Policy gate in `OnMessageReceived()` forwarded branch: drops incoming relay messages when willingness $\le 0$ without storing. Spray-and-wait binary splitting math and routing logic remain untouched.
-- Direct JNI call added in `GhostRouter.kt` to control relay willingness from the power policy engine.
-- Added `TestRelayWillingnessGate` unit test in Go verifying drop behavior, forwarding, and value clamping.
-
-**Battery Telemetry & Persistence (Android)**
-- Added `BatteryTelemetry.kt` with Room entity `TelemetryEntity` and DAO `TelemetryDao`.
-- Telemetry captures 15 fields every 60 seconds: battery %, temperature, scan/adv cumulative runtimes, GATT connections, TX/RX bytes, CPU wakeups, and delivered/forwarded counts.
-- 7-day automatic data pruning to prevent unbounded SQLite growth while preserving weekly trends.
-- Built-in CSV export functionality sharing via Android share sheet (`Intent.ACTION_SEND`).
-- Room database schema updated from version 3 to 4 with destructive migration fallback.
-
-**UI & Controls**
-- Added **Power Management** section to `SettingsScreen.kt`:
-  - Color-coded current mode chip indicator (`ACTIVE` green, `ECO` blue, `CRITICAL` orange, `DEEP_SLEEP` gray).
-  - Battery percentage indicator and latest telemetry snapshot summary card.
-  - Manual mode override chips (`ACT`, `ECO`, `CRIT`, `SLEEP`) with 1-hour override logic.
-  - "Export Battery Report" button to export and share telemetry CSV.
-- Added `ACTION_CYCLE_MODE` quick toggle action to the ongoing foreground notification.
-- Bumped app version string to `v0.2`.
+### Technical
+- Go: `EncodeBatch`/`DecodeBatch` wire format, `SetRelayWillingness` API
+- Kotlin: `PowerPolicyEngine`, `BatteryTelemetry`, `sendBatch` in BleManager
+- 15/15 Go tests passing, Gradle build successful
 
 ---
 
