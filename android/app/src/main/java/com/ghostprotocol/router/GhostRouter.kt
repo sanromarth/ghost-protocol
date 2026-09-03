@@ -116,4 +116,27 @@ class GhostRouter(
             "{\"error\": \"${e.message}\"}"
         }
     }
+
+    /**
+     * Set the relay willingness (0.0 to 1.0).
+     * At 0, the Go router drops forwarded messages (leaf node / low battery).
+     * At 1.0, all forwarded messages are accepted for relay.
+     * This is a policy gate — the Spray-and-Wait binary split logic is untouched.
+     *
+     * Uses reflection because the gomobile AAR must be rebuilt to expose this method.
+     * Once `gomobile bind` is re-run with the updated router.go, this works transparently.
+     */
+    fun setRelayWillingness(willingness: Float) {
+        try {
+            val r = router ?: return
+            val method = r.javaClass.getMethod("setRelayWillingness", Float::class.javaPrimitiveType)
+            method.invoke(r, willingness)
+            Log.d(TAG, ">>> ROUTER: relay willingness set to $willingness")
+        } catch (e: NoSuchMethodException) {
+            // AAR not yet rebuilt with SetRelayWillingness — safe to skip
+            Log.w(TAG, ">>> ROUTER: setRelayWillingness not available in AAR (rebuild gomobile)")
+        } catch (e: Exception) {
+            Log.e(TAG, ">>> ROUTER: setRelayWillingness error: ${e.message}")
+        }
+    }
 }
