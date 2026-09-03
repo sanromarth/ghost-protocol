@@ -26,7 +26,6 @@ object IdentityManager {
                 identityBlob = blob
                 prefs?.edit()
                     ?.putString(KEY_IDENTITY, Base64.encodeToString(blob, Base64.NO_WRAP))
-                    ?.putString(KEY_DISPLAY_NAME, "Ghost User")
                     ?.apply()
             }
         } catch (e: Exception) {
