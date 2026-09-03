@@ -6,9 +6,12 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -16,6 +19,10 @@ import com.ghostprotocol.ble.BleManager
 import com.ghostprotocol.crypto.GhostCrypto
 import com.ghostprotocol.data.GhostDatabase
 import com.ghostprotocol.data.MessageEntity
+import com.ghostprotocol.power.BatteryTelemetry
+import com.ghostprotocol.power.PowerMode
+import com.ghostprotocol.power.PowerPolicyEngine
+import com.ghostprotocol.power.TelemetrySnapshot
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
 import java.security.MessageDigest
@@ -30,6 +37,14 @@ class GhostService : Service() {
     private var ghostRouter: GhostRouter? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
+    // v0.2: Power policy engine and telemetry
+    private lateinit var powerPolicyEngine: PowerPolicyEngine
+    private lateinit var batteryTelemetry: BatteryTelemetry
+    private var lastEncounterTimeMs: Long = System.currentTimeMillis()
+    private var cpuWakeupCount: Int = 0
+    private var messagesForwardedCount: Int = 0
+    private var messagesDeliveredCount: Int = 0
+
     // Dedup for incoming direct BLE messages (content SHA-256 → timestamp)
     // Prevents duplicate chat bubbles from BLE GATT retries
     private val recentMessageHashes = java.util.concurrent.ConcurrentHashMap<String, Long>()
@@ -38,6 +53,10 @@ class GhostService : Service() {
         super.onCreate()
 
         IdentityManager.init(this)
+
+        // v0.2: Initialize power policy engine and telemetry
+        powerPolicyEngine = PowerPolicyEngine(applicationContext)
+        batteryTelemetry = BatteryTelemetry(applicationContext)
 
         createNotificationChannel()
 
@@ -49,11 +68,21 @@ class GhostService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        // v0.2: Add mode cycle action to notification
+        val modeIntent = Intent(this, GhostService::class.java).apply {
+            action = "ACTION_CYCLE_MODE"
+        }
+        val modePendingIntent = PendingIntent.getService(
+            this, 1, modeIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val notification = NotificationCompat.Builder(this, "ghost_mesh_channel")
             .setContentTitle("GHOST Mesh Active")
             .setContentText("Scanning for peers...")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)
+            .addAction(android.R.drawable.ic_menu_compass, "Mode: ECO", modePendingIntent)
             .addAction(android.R.drawable.ic_delete, "Quit GHOST", quitPendingIntent)
             .build()
 
@@ -79,6 +108,10 @@ class GhostService : Service() {
         startPeerMatching()
         startMessageProcessing()
         BatteryMonitor.start(this)
+
+        // v0.2: Start policy update loop and telemetry recording
+        startPolicyUpdateLoop()
+        startTelemetryLoop()
     }
 
     private fun initRouter() {
@@ -97,6 +130,7 @@ class GhostService : Service() {
                 scope = serviceScope,
                 onMessageForMe = { payload ->
                     // Routed message arrived for us — decrypt and save
+                    messagesDeliveredCount++
                     processRoutedPayload(payload)
                 }
             )
@@ -106,6 +140,169 @@ class GhostService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, ">>> ROUTER: Init failed: ${e.message}")
         }
+    }
+
+    // ===== v0.2: POWER POLICY UPDATE LOOP =====
+
+    /**
+     * Every 30 seconds: collect device state, compute policy, apply to BLE and router.
+     */
+    private fun startPolicyUpdateLoop() {
+        serviceScope.launch {
+            var lastMode: PowerMode? = null
+            while (isActive) {
+                try {
+                    cpuWakeupCount++
+                    val batteryPercent = getBatteryLevel()
+                    val isCharging = getChargingStatus()
+                    val screenOn = isScreenOn()
+                    val peerCount = BleManager.peers.value.size
+                    val queueSize = getRouterQueueSize()
+                    val timeSinceLastEncounter = System.currentTimeMillis() - lastEncounterTimeMs
+
+                    val policy = powerPolicyEngine.updateInputs(
+                        batteryPercent = batteryPercent,
+                        isCharging = isCharging,
+                        screenOn = screenOn,
+                        peerCount = peerCount,
+                        queueSize = queueSize,
+                        timeSinceLastEncounterMs = timeSinceLastEncounter,
+                        isMoving = null // Motion sensor not implemented yet
+                    )
+
+                    // Apply policy to BLE
+                    BleManager.setScanPolicy(policy.scanIntervalMs, policy.scanWindowMs)
+                    BleManager.setAdvertisePolicy(policy.advertiseIntervalMs, policy.txPowerLevel)
+
+                    // Apply relay willingness to Go router
+                    ghostRouter?.setRelayWillingness(policy.relayWillingness)
+
+                    // Manage WakeLock
+                    wakeLock?.let { wl ->
+                        if (!policy.wakeLockRequired && wl.isHeld) {
+                            wl.release()
+                            Log.d(TAG, ">>> WakeLock released (mode=${policy.mode})")
+                        } else if (policy.wakeLockRequired && !wl.isHeld) {
+                            wl.acquire(4 * 60 * 60 * 1000L)
+                            Log.d(TAG, ">>> WakeLock acquired (mode=${policy.mode})")
+                        } else {
+                            // No change needed
+                        }
+                    }
+
+                    // Log mode transitions
+                    if (lastMode != policy.mode) {
+                        Log.d(TAG, ">>> Power mode: ${policy.mode}, scan: ${policy.scanWindowMs}/${policy.scanIntervalMs}ms, relay: ${policy.relayWillingness}")
+                        lastMode = policy.mode
+                        updateNotification(policy.mode)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, ">>> Policy update error: ${e.message}")
+                }
+                delay(30_000L)
+            }
+        }
+    }
+
+    /**
+     * Every 60 seconds: record a telemetry snapshot to Room DB.
+     */
+    private fun startTelemetryLoop() {
+        serviceScope.launch {
+            while (isActive) {
+                delay(60_000L)
+                try {
+                    val snapshot = TelemetrySnapshot(
+                        timestamp = System.currentTimeMillis(),
+                        batteryPercent = getBatteryLevel(),
+                        batteryTemperature = getBatteryTemperature(),
+                        isCharging = getChargingStatus(),
+                        bleScanTimeMs = BleManager.cumulativeScanTimeMs,
+                        bleAdvertiseTimeMs = BleManager.cumulativeAdvertiseTimeMs,
+                        gattConnections = BleManager.gattConnectionCount.get(),
+                        gattBytesTx = BleManager.gattBytesTx.get(),
+                        gattBytesRx = BleManager.gattBytesRx.get(),
+                        cpuWakeups = cpuWakeupCount,
+                        messagesForwarded = messagesForwardedCount,
+                        messagesDelivered = messagesDeliveredCount,
+                        avgDeliveryLatencyMs = 0L, // Requires per-message tracking, deferred
+                        currentMode = powerPolicyEngine.currentPolicy.value.mode,
+                        peerCount = BleManager.peers.value.size
+                    )
+                    batteryTelemetry.recordSnapshot(snapshot)
+                } catch (e: Exception) {
+                    Log.e(TAG, ">>> Telemetry error: ${e.message}")
+                }
+            }
+        }
+    }
+
+    // ===== BATTERY HELPERS =====
+
+    private fun getBatteryLevel(): Int {
+        val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+        return if (scale > 0) (level * 100) / scale else -1
+    }
+
+    private fun getChargingStatus(): Boolean {
+        val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        return status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+    }
+
+    private fun getBatteryTemperature(): Float {
+        val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val temp = intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
+        return temp / 10.0f // BatteryManager reports in tenths of °C
+    }
+
+    private fun isScreenOn(): Boolean {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        return powerManager.isInteractive
+    }
+
+    private fun getRouterQueueSize(): Int {
+        return try {
+            val stats = ghostRouter?.getStats() ?: return 0
+            // Parse JSON stats for messagesPending
+            val regex = """"messagesPending":(\d+)""".toRegex()
+            regex.find(stats)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        } catch (e: Exception) {
+            0
+        }
+    }
+
+    // ===== NOTIFICATION UPDATES =====
+
+    private fun updateNotification(mode: PowerMode) {
+        val quitIntent = Intent(this, GhostService::class.java).apply {
+            action = "ACTION_STOP_SERVICE"
+        }
+        val quitPendingIntent = PendingIntent.getService(
+            this, 0, quitIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val modeIntent = Intent(this, GhostService::class.java).apply {
+            action = "ACTION_CYCLE_MODE"
+        }
+        val modePendingIntent = PendingIntent.getService(
+            this, 1, modeIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, "ghost_mesh_channel")
+            .setContentTitle("GHOST Mesh Active")
+            .setContentText("Mode: $mode | ${BleManager.peers.value.size} peers")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setOngoing(true)
+            .addAction(android.R.drawable.ic_menu_compass, "Mode: $mode", modePendingIntent)
+            .addAction(android.R.drawable.ic_delete, "Quit GHOST", quitPendingIntent)
+            .build()
+
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(1, notification)
     }
 
     /**
@@ -246,6 +443,9 @@ class GhostService : Service() {
                         contactDao.updateBleAddress(matchedContactId, peer.address)
                     }
 
+                    // Update last encounter time for policy engine
+                    lastEncounterTimeMs = System.currentTimeMillis()
+
                     // Always notify Go router — it handles queued message delivery
                     // Throttle to once per 10s per peer to avoid spam
                     val now = System.currentTimeMillis()
@@ -258,12 +458,29 @@ class GhostService : Service() {
                             val contactEd25519Pub = Base64.decode(existingContact.ed25519PubKey, Base64.NO_WRAP)
                             val peerId = MessageDigest.getInstance("SHA-256").digest(contactEd25519Pub)
                             val blobs = ghostRouter!!.onPeerDiscovered(peerId, peer.rssi)
-                            // Send ONE blob per discovery cycle to avoid concurrent GATT to same MAC
-                            // Next peer-matching cycle will pick up remaining blobs
-                            val blob = blobs.firstOrNull()
-                            if (blob != null) {
+
+                            if (blobs.isEmpty()) continue
+
+                            // v0.2: Check if the single returned blob is a batch
+                            // (first byte > 1 indicates batch count > 1)
+                            val blob = blobs.first()
+                            if (blobs.size == 1 && blob.size > 5 && (blob[0].toInt() and 0xFF) > 1) {
+                                // Batched blob — send via single GATT session
+                                val count = blob[0].toInt() and 0xFF
+                                Log.d(TAG, ">>> ROUTER SPRAY: sending batch of $count messages (${blob.size} bytes) to ${peer.address}")
+                                BleManager.sendBatch(peer.address, blob) { success ->
+                                    if (success) {
+                                        messagesForwardedCount += count
+                                    }
+                                    Log.d(TAG, ">>> ROUTER BATCH result: ${if (success) "SUCCESS ($count messages)" else "FAILED"}")
+                                }
+                            } else {
+                                // Single message or legacy path — send first blob
                                 Log.d(TAG, ">>> ROUTER SPRAY: sending ${blob.size} bytes to ${peer.address} (${blobs.size} total queued)")
                                 BleManager.sendMessage(peer.address, blob) { success ->
+                                    if (success) {
+                                        messagesForwardedCount++
+                                    }
                                     Log.d(TAG, ">>> ROUTER SPRAY result: ${if (success) "SUCCESS" else "FAILED"}")
                                 }
                             }
@@ -331,6 +548,10 @@ class GhostService : Service() {
                         // if the message is for us, which triggers processRoutedPayload()
                         val result = ghostRouter!!.onMessageReceived(incoming.data)
                         Log.d(TAG, ">>> ROUTER RESULT: $result")
+
+                        if (result == "forwarded") {
+                            messagesForwardedCount++
+                        }
 
                         if (result.startsWith("error") || result.startsWith("router not")) {
                             // Router couldn't decode routing header OR router never started
@@ -435,6 +656,7 @@ class GhostService : Service() {
                 isVerified = isVerified
             )
             messageDao.insert(message)
+            messagesDeliveredCount++
             Log.d(TAG, ">>> MESSAGE SAVED: from '${senderName ?: contact.name}' text=\"$text\"")
 
         } catch (e: Exception) {
@@ -454,8 +676,33 @@ class GhostService : Service() {
                 Log.d(TAG, ">>> Broadcasting name update to all contacts")
                 broadcastNameUpdate()
             }
+            "ACTION_CYCLE_MODE" -> {
+                Log.d(TAG, ">>> User tapped cycle mode")
+                cycleMode()
+            }
         }
         return START_STICKY
+    }
+
+    /**
+     * Cycle through power modes: ACTIVE → ECO → CRITICAL → DEEP_SLEEP → (auto).
+     * Each forced mode lasts 1 hour, then reverts to automatic policy.
+     */
+    private fun cycleMode() {
+        val currentOverride = powerPolicyEngine.getOverrideMode()
+        val nextMode = when (currentOverride) {
+            null -> PowerMode.ACTIVE
+            PowerMode.ACTIVE -> PowerMode.ECO
+            PowerMode.ECO -> PowerMode.CRITICAL
+            PowerMode.CRITICAL -> PowerMode.DEEP_SLEEP
+            PowerMode.DEEP_SLEEP -> {
+                powerPolicyEngine.clearOverride()
+                Log.d(TAG, ">>> Power mode: AUTO (override cleared)")
+                return
+            }
+        }
+        powerPolicyEngine.forceMode(nextMode, 3_600_000L) // 1 hour
+        Log.d(TAG, ">>> Power mode forced: $nextMode (1 hour override)")
     }
 
     /**
@@ -535,7 +782,7 @@ class GhostService : Service() {
         val alarmManager = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
         alarmManager.set(
             android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
-            android.os.SystemClock.elapsedRealtime() + 1000,
+            SystemClock.elapsedRealtime() + 1000,
             pendingIntent
         )
         super.onTaskRemoved(rootIntent)
