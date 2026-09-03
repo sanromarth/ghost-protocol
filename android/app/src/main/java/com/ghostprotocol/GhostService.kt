@@ -43,6 +43,9 @@ class GhostService : Service() {
         // TODO(v0.3): Use bound service + Messenger instead of static StateFlow
         private val _currentPowerPolicy = MutableStateFlow(PowerPolicyEngine.DEFAULT_ECO_POLICY)
         val currentPowerPolicy: StateFlow<PowerPolicy> = _currentPowerPolicy.asStateFlow()
+
+        // In-memory cache for verification packets received before contact QR is scanned
+        val pendingVerifications = java.util.concurrent.ConcurrentHashMap<String, Long>()
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -443,7 +446,12 @@ class GhostService : Service() {
 
                 val contact = contactDao.getById(senderContactId)
                 if (contact == null) {
-                    Log.w(TAG, ">>> ROUTED: unknown sender $senderContactId, dropping")
+                    if (text.startsWith("* verified ") || text.startsWith("* mutual verification with ")) {
+                        Log.d(TAG, ">>> PRE-SCAN ROUTED VERIFICATION CACHED from $senderContactId: $text")
+                        pendingVerifications[senderContactId] = System.currentTimeMillis()
+                    } else {
+                        Log.w(TAG, ">>> ROUTED: unknown sender $senderContactId, dropping")
+                    }
                     return@launch
                 }
 
@@ -545,6 +553,17 @@ class GhostService : Service() {
                     val now = System.currentTimeMillis()
                     val lastCall = lastRouterCall[matchedContactId] ?: 0L
                     val hasPendingRoom = db.messageDao().getSprayedOrPendingForContact(matchedContactId).isNotEmpty()
+
+                    // Verification Handshake Check:
+                    // If we verified this contact but mutual verification is not recorded yet,
+                    // send our verification ping now that peer is in BLE range!
+                    val contactMsgs = db.messageDao().getMessagesForContactOnce(matchedContactId)
+                    val hasVerified = contactMsgs.any { it.content.startsWith("* verified ") }
+                    val hasMutual = contactMsgs.any { it.content.startsWith("* mutual verification with ") }
+                    if (hasVerified && !hasMutual) {
+                        val myName = IdentityManager.getDisplayName()
+                        sendVerificationPayload(existingContact.copy(bleAddress = peer.address), "$myName\u0000* verified $myName *")
+                    }
 
                     // Throttle only if there are no pending messages to deliver
                     if (!hasPendingRoom && (now - lastCall < 10_000)) continue
@@ -736,7 +755,12 @@ class GhostService : Service() {
 
             val contact = contactDao.getById(senderContactId)
             if (contact == null) {
-                Log.w(TAG, ">>> UNKNOWN SENDER: contactId=$senderContactId not in database, dropping message")
+                if (text.startsWith("* verified ") || text.startsWith("* mutual verification with ")) {
+                    Log.d(TAG, ">>> PRE-SCAN DIRECT VERIFICATION CACHED from $senderContactId: $text")
+                    pendingVerifications[senderContactId] = System.currentTimeMillis()
+                } else {
+                    Log.w(TAG, ">>> UNKNOWN SENDER: contactId=$senderContactId not in database, dropping message")
+                }
                 return
             }
 
@@ -842,7 +866,7 @@ class GhostService : Service() {
                 val contact = contactDao.getById(senderContactId)
                 if (contact != null) {
                     val myName = IdentityManager.getDisplayName()
-                    sendVerificationPayload(contact, "* mutual verification with $myName *")
+                    sendVerificationPayload(contact, "$myName\u0000* mutual verification with $myName *")
                 }
             }
         } else if (text.startsWith("* mutual verification with ")) {

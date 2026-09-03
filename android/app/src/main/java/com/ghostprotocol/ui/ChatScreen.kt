@@ -379,25 +379,12 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                     }
 
                     Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                contact?.name ?: "Chat",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 18.sp,
-                                color = T.TextPrimary
-                            )
-                            val isMutuallyVerified = messages.any { it.content.startsWith("* mutual verification with ") }
-                            val isVerified = contact?.isVerified == true || messages.any { it.content.startsWith("* verified ") }
-                            if (isMutuallyVerified) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("🔒", fontSize = 13.sp)
-                                Spacer(modifier = Modifier.width(2.dp))
-                                Text("✔", fontSize = 13.sp, color = T.Online, fontWeight = FontWeight.Bold)
-                            } else if (isVerified) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("✔", fontSize = 13.sp, color = T.PurpleLight, fontWeight = FontWeight.Bold)
-                            }
-                        }
+                        Text(
+                            contact?.name ?: "Chat",
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 18.sp,
+                            color = T.TextPrimary
+                        )
                         Text(
                             text = "#" + (contact?.id?.take(6) ?: ""),
                             fontSize = 12.sp,
@@ -752,9 +739,6 @@ fun SystemVerificationBubble(message: MessageEntity) {
                 )
                 .padding(horizontal = 12.dp, vertical = 5.dp)
         ) {
-            if (isMutual) {
-                Text("🔒 ", fontSize = 12.sp)
-            }
             Text(
                 text = "${message.content} [$timeStr]",
                 color = if (isMutual) T.Online else T.TextMuted,

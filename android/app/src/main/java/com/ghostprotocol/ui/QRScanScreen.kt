@@ -197,7 +197,8 @@ fun QRScanScreen(navController: NavController) {
                                                                         db.messageDao().insert(verifiedMsg)
                                                                     }
 
-                                                                    val alreadyReceivedVerification = existingMessages.any { it.content.startsWith("* verified ") }
+                                                                    val preScanVerification = com.ghostprotocol.GhostService.pendingVerifications.remove(id) != null
+                                                                    val alreadyReceivedVerification = preScanVerification || existingMessages.any { it.content.startsWith("* verified ") }
                                                                     val alreadyMutuallyVerified = existingMessages.any { it.content.startsWith("* mutual verification with ") }
 
                                                                     if (alreadyReceivedVerification && !alreadyMutuallyVerified) {
@@ -218,7 +219,7 @@ fun QRScanScreen(navController: NavController) {
                                                                     try {
                                                                         val myName = com.ghostprotocol.IdentityManager.getDisplayName()
                                                                         val myEd25519PubKey = com.ghostprotocol.IdentityManager.getEd25519PubKey()
-                                                                        val wireText = if (alreadyReceivedVerification) "* mutual verification with $myName *" else "* verified $myName *"
+                                                                        val wireText = if (alreadyReceivedVerification) "$myName\u0000* mutual verification with $myName *" else "$myName\u0000* verified $myName *"
                                                                         val plaintextBytes = wireText.toByteArray(Charsets.UTF_8)
                                                                         val payload = myEd25519PubKey + plaintextBytes
                                                                         val signature = com.ghostprotocol.crypto.GhostCrypto.sign(com.ghostprotocol.IdentityManager.getEd25519Seed(), payload)
