@@ -449,3 +449,167 @@ func TestRouterGetStats(t *testing.T) {
 		t.Errorf("stats too short: %s", stats)
 	}
 }
+
+func TestBatchEncodingRoundtrip(t *testing.T) {
+	// Create 3 test messages with different payloads
+	messages := make([]*Message, 3)
+	for i := 0; i < 3; i++ {
+		messages[i] = &Message{
+			ID:              bytes.Repeat([]byte{byte(0x10 + i)}, 32),
+			Src:             bytes.Repeat([]byte{0xAA}, 32),
+			Dst:             bytes.Repeat([]byte{0xBB}, 32),
+			Payload:         []byte("test payload " + string(rune('A'+i))),
+			CopiesRemaining: 4 - i,
+			TTLSeconds:      86400,
+			HopCount:        i,
+			CreatedAt:       time.Now().Unix(),
+			Status:          StatusPending,
+		}
+	}
+
+	// Encode each message individually
+	encodedMsgs := make([][]byte, 3)
+	for i, msg := range messages {
+		encodedMsgs[i] = EncodeMessage(msg)
+		if len(encodedMsgs[i]) == 0 {
+			t.Fatalf("EncodeMessage returned empty for message %d", i)
+		}
+	}
+
+	// Batch encode
+	batched, err := EncodeBatch(encodedMsgs)
+	if err != nil {
+		t.Fatalf("EncodeBatch failed: %v", err)
+	}
+
+	// Verify batch header: first byte should be count=3
+	if batched[0] != 3 {
+		t.Errorf("batch count: got %d, want 3", batched[0])
+	}
+
+	// Decode batch
+	decoded, err := DecodeBatch(batched)
+	if err != nil {
+		t.Fatalf("DecodeBatch failed: %v", err)
+	}
+
+	if len(decoded) != 3 {
+		t.Fatalf("decoded count: got %d, want 3", len(decoded))
+	}
+
+	// Verify each decoded message matches the original encoded message
+	for i := 0; i < 3; i++ {
+		if !bytes.Equal(decoded[i], encodedMsgs[i]) {
+			t.Errorf("message %d mismatch: decoded %d bytes, original %d bytes", i, len(decoded[i]), len(encodedMsgs[i]))
+		}
+
+		// Also verify the decoded message can be parsed back
+		result, err := decodeMessage(decoded[i])
+		if err != nil {
+			t.Errorf("decodeMessage on decoded[%d] failed: %v", i, err)
+			continue
+		}
+		if !bytes.Equal(result.Header.MessageID, messages[i].ID) {
+			t.Errorf("message %d ID mismatch after roundtrip", i)
+		}
+		if !bytes.Equal(result.Payload, messages[i].Payload) {
+			t.Errorf("message %d payload mismatch after roundtrip", i)
+		}
+	}
+
+	// Verify single message still works through existing path (not batched)
+	singleEncoded := EncodeMessage(messages[0])
+	singleResult, err := decodeMessage(singleEncoded)
+	if err != nil {
+		t.Fatalf("single message decode failed: %v", err)
+	}
+	if !bytes.Equal(singleResult.Payload, messages[0].Payload) {
+		t.Error("single message payload mismatch")
+	}
+
+	// Verify edge cases
+	_, err = EncodeBatch(nil)
+	if err == nil {
+		t.Error("EncodeBatch(nil) should fail")
+	}
+	_, err = EncodeBatch([][]byte{})
+	if err == nil {
+		t.Error("EncodeBatch(empty) should fail")
+	}
+	_, err = DecodeBatch([]byte{})
+	if err == nil {
+		t.Error("DecodeBatch(empty) should fail")
+	}
+	_, err = DecodeBatch([]byte{0})
+	if err == nil {
+		t.Error("DecodeBatch(count=0) should fail")
+	}
+}
+
+func TestRelayWillingnessGate(t *testing.T) {
+	localID := bytes.Repeat([]byte{0xAA}, 32)
+	senderID := bytes.Repeat([]byte{0xCC}, 32)
+	otherDstID := bytes.Repeat([]byte{0xDD}, 32)
+
+	// Create a message destined for someone else (forwarded case)
+	forwardedMsg := &Message{
+		ID:              bytes.Repeat([]byte{0x42}, 32),
+		Src:             senderID,
+		Dst:             otherDstID,
+		Payload:         []byte("relay test payload"),
+		CopiesRemaining: 2,
+		TTLSeconds:      86400,
+		HopCount:        1,
+		CreatedAt:       time.Now().Unix(),
+		Status:          StatusSprayed,
+	}
+	encoded := EncodeMessage(forwardedMsg)
+
+	// Test 1: willingness = 0 → forwarded message should be dropped
+	router, err := NewRouter(localID, tempDBPath(t))
+	if err != nil {
+		t.Fatalf("NewRouter failed: %v", err)
+	}
+	router.SetHandler(&testDeliverHandler{})
+	router.Start()
+	defer router.Stop()
+
+	router.SetRelayWillingness(0)
+	result := router.OnMessageReceived(encoded)
+	if result != "dropped: low battery, not relaying" {
+		t.Errorf("willingness=0: got %q, want %q", result, "dropped: low battery, not relaying")
+	}
+
+	// Test 2: willingness = 1.0 → same message should be forwarded
+	router2, err := NewRouter(localID, tempDBPath(t))
+	if err != nil {
+		t.Fatalf("NewRouter failed: %v", err)
+	}
+	router2.SetHandler(&testDeliverHandler{})
+	router2.Start()
+	defer router2.Stop()
+
+	router2.SetRelayWillingness(1.0)
+	result2 := router2.OnMessageReceived(encoded)
+	if result2 != "forwarded" {
+		t.Errorf("willingness=1.0: got %q, want %q", result2, "forwarded")
+	}
+
+	// Test 3: GetRelayWillingness returns correct value
+	if w := router.GetRelayWillingness(); w != 0 {
+		t.Errorf("GetRelayWillingness: got %f, want 0", w)
+	}
+	if w := router2.GetRelayWillingness(); w != 1.0 {
+		t.Errorf("GetRelayWillingness: got %f, want 1.0", w)
+	}
+
+	// Test 4: Clamping
+	router.SetRelayWillingness(-5)
+	if w := router.GetRelayWillingness(); w != 0 {
+		t.Errorf("clamping negative: got %f, want 0", w)
+	}
+	router.SetRelayWillingness(10)
+	if w := router.GetRelayWillingness(); w != 1 {
+		t.Errorf("clamping >1: got %f, want 1", w)
+	}
+}
