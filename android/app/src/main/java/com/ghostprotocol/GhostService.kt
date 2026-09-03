@@ -7,6 +7,7 @@ import android.app.Service
 import android.bluetooth.BluetoothAdapter
 import android.content.BroadcastReceiver
 import android.content.Context
+import kotlin.coroutines.resume
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
@@ -540,60 +541,40 @@ class GhostService : Service() {
                     // Update last encounter time for policy engine
                     lastEncounterTimeMs = System.currentTimeMillis()
 
-                    // Always notify Go router — it handles queued message delivery
-                    // Throttle to once per 10s per peer to avoid spam
                     val now = System.currentTimeMillis()
                     val lastCall = lastRouterCall[matchedContactId] ?: 0L
-                    if (now - lastCall < 10_000) continue
+                    val hasPendingRoom = db.messageDao().getSprayedOrPendingForContact(matchedContactId).isNotEmpty()
+
+                    // Throttle only if there are no pending messages to deliver
+                    if (!hasPendingRoom && (now - lastCall < 10_000)) continue
                     lastRouterCall[matchedContactId] = now
 
+                    // 1. Deliver router multihop/sprayed blobs if available
                     if (ghostRouter != null) {
                         try {
                             val contactEd25519Pub = Base64.decode(existingContact.ed25519PubKey, Base64.NO_WRAP)
                             val peerId = MessageDigest.getInstance("SHA-256").digest(contactEd25519Pub)
                             val blobs = ghostRouter!!.onPeerDiscovered(peerId, peer.rssi)
 
-                            if (blobs.isEmpty()) continue
-
-                            // v0.2: Check if the single returned blob is a batch
-                            // (first byte > 1 indicates batch count > 1)
-                            val blob = blobs.first()
-                            if (blobs.size == 1 && blob.size > 5 && (blob[0].toInt() and 0xFF) > 1) {
-                                // Batched blob — send via single GATT session
-                                val count = blob[0].toInt() and 0xFF
-                                Log.d(TAG, ">>> ROUTER SPRAY: sending batch of $count messages (${blob.size} bytes) to ${peer.address}")
-                                BleManager.sendBatch(peer.address, blob) { success ->
-                                    if (success) {
-                                        messagesForwardedCount += count
-                                        // TODO(v0.3): Track individual message IDs through router for precise status updates.
-                                        // For v0.2, OnPeerDiscovered returns all pending messages for dst peer, so bulk update is safe.
-                                        serviceScope.launch(Dispatchers.IO) {
-                                            db.messageDao().updateStatusesForContact(
-                                                matchedContactId,
-                                                listOf(MessageEntity.STATUS_SPRAYED, MessageEntity.STATUS_PENDING),
-                                                MessageEntity.STATUS_SENT
-                                            )
+                            if (blobs.isNotEmpty()) {
+                                val blob = blobs.first()
+                                if (blobs.size == 1 && blob.size > 5 && (blob[0].toInt() and 0xFF) > 1) {
+                                    val count = blob[0].toInt() and 0xFF
+                                    Log.d(TAG, ">>> ROUTER SPRAY: sending batch of $count messages (${blob.size} bytes) to ${peer.address}")
+                                    BleManager.sendBatch(peer.address, blob) { success ->
+                                        if (success) {
+                                            messagesForwardedCount += count
                                         }
+                                        Log.d(TAG, ">>> ROUTER BATCH result: ${if (success) "SUCCESS ($count messages)" else "FAILED"}")
                                     }
-                                    Log.d(TAG, ">>> ROUTER BATCH result: ${if (success) "SUCCESS ($count messages)" else "FAILED"}")
-                                }
-                            } else {
-                                // Single message or legacy path — send first blob
-                                Log.d(TAG, ">>> ROUTER SPRAY: sending ${blob.size} bytes to ${peer.address} (${blobs.size} total queued)")
-                                BleManager.sendMessage(peer.address, blob) { success ->
-                                    if (success) {
-                                        messagesForwardedCount++
-                                        // TODO(v0.3): Track individual message IDs through router for precise status updates.
-                                        // For v0.2, OnPeerDiscovered returns all pending messages for dst peer, so bulk update is safe.
-                                        serviceScope.launch(Dispatchers.IO) {
-                                            db.messageDao().updateStatusesForContact(
-                                                matchedContactId,
-                                                listOf(MessageEntity.STATUS_SPRAYED, MessageEntity.STATUS_PENDING),
-                                                MessageEntity.STATUS_SENT
-                                            )
+                                } else {
+                                    Log.d(TAG, ">>> ROUTER SPRAY: sending ${blob.size} bytes to ${peer.address} (${blobs.size} total queued)")
+                                    BleManager.sendMessage(peer.address, blob) { success ->
+                                        if (success) {
+                                            messagesForwardedCount++
                                         }
+                                        Log.d(TAG, ">>> ROUTER SPRAY result: ${if (success) "SUCCESS" else "FAILED"}")
                                     }
-                                    Log.d(TAG, ">>> ROUTER SPRAY result: ${if (success) "SUCCESS" else "FAILED"}")
                                 }
                             }
                         } catch (e: Exception) {
@@ -601,36 +582,46 @@ class GhostService : Service() {
                         }
                     }
 
-                    // Auto-retry pending messages — only when router is NOT active
-                    if (ghostRouter == null) {
-                        try {
-                            val pendingMessages = db.messageDao().getPendingMessages()
-                            val contactPending = pendingMessages.filter { it.contactId == matchedContactId }
-                            for (msg in contactPending) {
-                                Log.d(TAG, ">>> AUTO-RETRY: sending pending message '${msg.content.take(20)}' to ${peer.address}")
-                                val contact = contactDao.getById(matchedContactId) ?: continue
-                                val contactX25519Pub = Base64.decode(contact.x25519PubKey, Base64.NO_WRAP)
-                                val myEd25519PubKey = IdentityManager.getEd25519PubKey()
-                                // Must match ChatViewModel format: username\0message
-                                val myName = IdentityManager.getDisplayName()
-                                val plaintextBytes = (myName + "\u0000" + msg.content).toByteArray(Charsets.UTF_8)
+                    // 2. Deliver any pending or sprayed messages in Room DB for this contact
+                    try {
+                        val pendingRoom = db.messageDao().getSprayedOrPendingForContact(matchedContactId)
+                        if (pendingRoom.isNotEmpty()) {
+                            Log.d(TAG, ">>> RE-ENCOUNTER: Delivering ${pendingRoom.size} delayed/sprayed messages for '${existingContact.name}'")
+                            val contactX25519Pub = Base64.decode(existingContact.x25519PubKey, Base64.NO_WRAP)
+                            val myEd25519PubKey = IdentityManager.getEd25519PubKey()
+                            val myName = IdentityManager.getDisplayName()
+
+                            for (msg in pendingRoom) {
+                                val wireText = if (msg.replyToText != null) {
+                                    "$myName\u0000REPLY\u0000${msg.replyToSender ?: ""}\u0000${msg.replyToText}\u0000${msg.content}"
+                                } else {
+                                    "$myName\u0000${msg.content}"
+                                }
+                                val plaintextBytes = wireText.toByteArray(Charsets.UTF_8)
                                 val payload = myEd25519PubKey + plaintextBytes
                                 val signature = GhostCrypto.sign(IdentityManager.getEd25519Seed(), payload)
                                 val fullPayload = payload + signature
                                 val ciphertext = GhostCrypto.encrypt(contactX25519Pub, fullPayload)
-                                BleManager.sendMessage(peer.address, ciphertext) { success ->
-                                    serviceScope.launch {
-                                        db.messageDao().updateStatus(
-                                            msg.id,
-                                            if (success) MessageEntity.STATUS_SENT else MessageEntity.STATUS_FAILED
-                                        )
-                                        Log.d(TAG, ">>> AUTO-RETRY result: ${if (success) "SUCCESS" else "FAILED"} for '${msg.content.take(20)}'")
+
+                                val success = kotlinx.coroutines.suspendCancellableCoroutine<Boolean> { cont ->
+                                    BleManager.sendMessage(peer.address, ciphertext) { ok ->
+                                        if (cont.isActive) cont.resume(ok)
                                     }
                                 }
+
+                                if (success) {
+                                    messagesForwardedCount++
+                                    db.messageDao().updateStatus(msg.id, MessageEntity.STATUS_SENT)
+                                    Log.d(TAG, ">>> DELIVERED delayed message ${msg.id} to '${existingContact.name}'")
+                                } else {
+                                    Log.e(TAG, ">>> FAILED to deliver delayed message ${msg.id} to ${peer.address}")
+                                    break // Stop loop on failure to allow retry on next encounter
+                                }
+                                delay(300L) // Yield between successive GATT writes
                             }
-                        } catch (e: Exception) {
-                            Log.e(TAG, ">>> AUTO-RETRY error: ${e.message}")
                         }
+                    } catch (e: Exception) {
+                        Log.e(TAG, ">>> Error delivering Room messages to '${existingContact.name}': ${e.message}")
                     }
                 }
             }
