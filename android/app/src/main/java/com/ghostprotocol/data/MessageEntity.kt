@@ -17,7 +17,10 @@ data class MessageEntity(
     val isOutgoing: Boolean,
     val timestamp: Long = System.currentTimeMillis(),
     val isVerified: Boolean = false,     // Ed25519 signature verified
-    val status: Int = 0  // 0=PENDING, 1=SENT, 2=DELIVERED, 3=FAILED
+    val status: Int = 0, // 0=PENDING, 1=SENT, 2=DELIVERED, 3=FAILED, 4=SPRAYED
+    val replyToId: String? = null,       // ID of message being replied to (if any)
+    val replyToSender: String? = null,   // Author display name of quoted message
+    val replyToText: String? = null      // Preview text of quoted message
 ) {
     companion object {
         const val STATUS_PENDING = 0

@@ -237,8 +237,14 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                 ) {
                     items(filtered) { contact ->
                         val isOnline = blePeers.any { peer ->
-                            peer.address == contact.bleAddress &&
-                            System.currentTimeMillis() - peer.lastSeen < 60_000
+                            val matchesAddress = contact.bleAddress != null && peer.address == contact.bleAddress
+                            val matchesFp = peer.fingerprint != null && contact.ed25519PubKey != null && try {
+                                val contactFp = java.security.MessageDigest.getInstance("SHA-256")
+                                    .digest(Base64.decode(contact.ed25519PubKey, Base64.NO_WRAP))
+                                    .copyOfRange(0, 4)
+                                peer.fingerprint.contentEquals(contactFp)
+                            } catch (_: Exception) { false }
+                            (matchesAddress || matchesFp) && (System.currentTimeMillis() - peer.lastSeen < 120_000L)
                         }
                         PremiumContactRow(
                             contact = contact,

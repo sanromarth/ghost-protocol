@@ -55,6 +55,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
 
 // ======================== ViewModel ========================
@@ -79,7 +80,11 @@ class ChatViewModel(application: Application, private val contactId: String) : A
         }
     }
 
-    fun sendMessage(text: String) {
+    fun sendMessage(
+        text: String,
+        replyTo: MessageEntity? = null,
+        replySenderName: String? = null
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
             // Re-entrancy guard: prevent duplicate sends on rapid taps
             if (!_isSending.compareAndSet(false, true)) return@launch
@@ -89,9 +94,17 @@ class ChatViewModel(application: Application, private val contactId: String) : A
                 _contact.value = freshContact
 
                 val myEd25519PubKey = IdentityManager.getEd25519PubKey()
-                // Include sender username for profile sync (username + \0 + message)
                 val myName = IdentityManager.getDisplayName()
-                val plaintextBytes = (myName + "\u0000" + text).toByteArray(Charsets.UTF_8)
+                // Reply wire format: senderName\u0000REPLY\u0000quotedSender\u0000quotedText\u0000message
+                // Backward-compatible: non-reply messages use senderName\u0000message (no REPLY token)
+                val plaintextBytes = if (replyTo != null) {
+                    val quotedSender = if (replyTo.isOutgoing) "You" else (replySenderName ?: "Contact")
+                    val quotedText = replyTo.content.take(120)
+                    (myName + "\u0000REPLY\u0000" + quotedSender + "\u0000" + quotedText + "\u0000" + text).toByteArray(Charsets.UTF_8)
+                } else {
+                    (myName + "\u0000" + text).toByteArray(Charsets.UTF_8)
+                }
+
                 val payload = myEd25519PubKey + plaintextBytes
                 val signature = GhostCrypto.sign(IdentityManager.getEd25519Seed(), payload)
                 val fullPayload = payload + signature
@@ -105,7 +118,10 @@ class ChatViewModel(application: Application, private val contactId: String) : A
                     isOutgoing = true,
                     timestamp = System.currentTimeMillis(),
                     isVerified = true,
-                    status = MessageEntity.STATUS_PENDING
+                    status = MessageEntity.STATUS_PENDING,
+                    replyToId = replyTo?.id,
+                    replyToSender = if (replyTo != null) (if (replyTo.isOutgoing) "You" else (replySenderName ?: "Contact")) else null,
+                    replyToText = replyTo?.content?.take(120)
                 )
                 messageId = message.id
                 messageDao.insert(message)
@@ -119,17 +135,18 @@ class ChatViewModel(application: Application, private val contactId: String) : A
                     if (isDirect && blob != null && freshContact.bleAddress != null) {
                         BleManager.sendMessage(freshContact.bleAddress, blob) { success ->
                             viewModelScope.launch(Dispatchers.IO) {
-                                messageDao.updateStatus(
-                                    message.id,
-                                    if (success) MessageEntity.STATUS_SENT else MessageEntity.STATUS_FAILED
-                                )
+                                if (success) {
+                                    messageDao.updateStatus(message.id, MessageEntity.STATUS_SENT)
+                                } else {
+                                    // Direct send failed (peer disconnected, screen off, or out of range)
+                                    // Hold as SPRAYED in Room, and queue in Go router for spray delivery
+                                    messageDao.updateStatus(message.id, MessageEntity.STATUS_SPRAYED)
+                                    try { router.sendMessage(dstId, ciphertext) } catch (_: Exception) {}
+                                }
                             }
                         }
-                    } else if (isDirect && freshContact.bleAddress == null) {
-                        // Router said "direct" but we have no BLE address — message NOT queued for spray
-                        // Mark as FAILED so user can retry when BLE address is discovered
-                        messageDao.updateStatus(message.id, MessageEntity.STATUS_FAILED)
                     } else {
+                        // Peer offline or no direct BLE address — queued in mesh router
                         messageDao.updateStatus(message.id, MessageEntity.STATUS_SPRAYED)
                     }
                 } else if (freshContact.bleAddress != null) {
@@ -137,22 +154,43 @@ class ChatViewModel(application: Application, private val contactId: String) : A
                         viewModelScope.launch(Dispatchers.IO) {
                             messageDao.updateStatus(
                                 message.id,
-                                if (success) MessageEntity.STATUS_SENT else MessageEntity.STATUS_FAILED
+                                if (success) MessageEntity.STATUS_SENT else MessageEntity.STATUS_SPRAYED
                             )
                         }
                     }
                 } else {
-                    // No router AND no BLE address — can't send at all
-                    messageDao.updateStatus(message.id, MessageEntity.STATUS_FAILED)
+                    messageDao.updateStatus(message.id, MessageEntity.STATUS_SPRAYED)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                // Don't leave message spinning forever — mark as failed
+                // Don't leave message spinning forever — mark as SPRAYED to allow DTN delivery
                 messageId?.let { id ->
-                    try { messageDao.updateStatus(id, MessageEntity.STATUS_FAILED) } catch (_: Exception) {}
+                    try { messageDao.updateStatus(id, MessageEntity.STATUS_SPRAYED) } catch (_: Exception) {}
                 }
             } finally {
                 _isSending.value = false
+            }
+        }
+    }
+
+    fun deleteMessage(messageId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            messageDao.deleteById(messageId)
+        }
+    }
+
+    fun clearChat() {
+        viewModelScope.launch(Dispatchers.IO) {
+            messageDao.deleteForContact(contactId)
+        }
+    }
+
+    fun deleteContact(onDeleted: () -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            messageDao.deleteForContact(contactId)
+            contactDao.getById(contactId)?.let { contactDao.delete(it) }
+            withContext(Dispatchers.Main) {
+                onDeleted()
             }
         }
     }
@@ -164,7 +202,6 @@ class ChatViewModel(application: Application, private val contactId: String) : A
             try {
                 val contactX25519Pub = Base64.decode(freshContact.x25519PubKey, Base64.NO_WRAP)
                 val myEd25519PubKey = IdentityManager.getEd25519PubKey()
-                // Must match sendMessage format: username\0message
                 val myName = IdentityManager.getDisplayName()
                 val plaintextBytes = (myName + "\u0000" + message.content).toByteArray(Charsets.UTF_8)
                 val payload = myEd25519PubKey + plaintextBytes
@@ -183,26 +220,24 @@ class ChatViewModel(application: Application, private val contactId: String) : A
                             viewModelScope.launch(Dispatchers.IO) {
                                 messageDao.updateStatus(
                                     message.id,
-                                    if (success) MessageEntity.STATUS_SENT else MessageEntity.STATUS_FAILED
+                                    if (success) MessageEntity.STATUS_SENT else MessageEntity.STATUS_SPRAYED
                                 )
                             }
                         }
-                    } else if (isDirect && freshContact.bleAddress == null) {
-                        messageDao.updateStatus(message.id, MessageEntity.STATUS_FAILED)
                     } else {
                         messageDao.updateStatus(message.id, MessageEntity.STATUS_SPRAYED)
                     }
                 } else if (freshContact.bleAddress != null) {
                     BleManager.sendMessage(freshContact.bleAddress, ciphertext) { success ->
                         viewModelScope.launch(Dispatchers.IO) {
-                            messageDao.updateStatus(message.id, if (success) MessageEntity.STATUS_SENT else MessageEntity.STATUS_FAILED)
+                            messageDao.updateStatus(message.id, if (success) MessageEntity.STATUS_SENT else MessageEntity.STATUS_SPRAYED)
                         }
                     }
                 } else {
-                    messageDao.updateStatus(message.id, MessageEntity.STATUS_FAILED)
+                    messageDao.updateStatus(message.id, MessageEntity.STATUS_SPRAYED)
                 }
             } catch (e: Exception) {
-                messageDao.updateStatus(message.id, MessageEntity.STATUS_FAILED)
+                messageDao.updateStatus(message.id, MessageEntity.STATUS_SPRAYED)
             }
         }
     }
@@ -309,11 +344,17 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                                     fontSize = 16.sp
                                 )
                             }
-                            // Online dot — check actual BLE proximity
+                            // Online dot — check actual BLE proximity with 120s hysteresis & fingerprint fallback
                             val blePeers by BleManager.peers.collectAsState()
-                            val isOnline = contact?.bleAddress != null && blePeers.any { peer ->
-                                peer.address == contact?.bleAddress &&
-                                System.currentTimeMillis() - peer.lastSeen < 60_000
+                            val isOnline = contact != null && blePeers.any { peer ->
+                                val matchesAddress = contact?.bleAddress != null && peer.address == contact?.bleAddress
+                                val matchesFp = peer.fingerprint != null && contact?.ed25519PubKey != null && try {
+                                    val contactFp = java.security.MessageDigest.getInstance("SHA-256")
+                                        .digest(Base64.decode(contact!!.ed25519PubKey, Base64.NO_WRAP))
+                                        .copyOfRange(0, 4)
+                                    peer.fingerprint.contentEquals(contactFp)
+                                } catch (_: Exception) { false }
+                                (matchesAddress || matchesFp) && (System.currentTimeMillis() - peer.lastSeen < 120_000L)
                             }
                             if (isOnline) {
                                 Box(
@@ -422,7 +463,11 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                                 if (sendEnabled) {
                                     Modifier.clickable {
                                         haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                        viewModel.sendMessage(inputText)
+                                        viewModel.sendMessage(
+                                            text = inputText,
+                                            replyTo = replyToMessage,
+                                            replySenderName = contact?.name
+                                        )
                                         inputText = ""
                                         replyToMessage = null
                                     }
@@ -549,7 +594,7 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                 clipboardManager.setText(AnnotatedString(selectedMessage!!.content))
             },
             onDelete = {
-                // For now, just dismiss — delete requires DAO work
+                selectedMessage?.let { viewModel.deleteMessage(it.id) }
             }
         )
     }
@@ -560,8 +605,12 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
             sheetState = contactSheetState,
             onDismiss = { showContactInfo = false },
             onShowQR = { navController.navigate("qr_show") },
-            onClearChat = { /* TODO: clear messages for contact */ },
-            onDeleteContact = { /* TODO: delete contact + navigate back */ }
+            onClearChat = { viewModel.clearChat() },
+            onDeleteContact = {
+                viewModel.deleteContact {
+                    navController.popBackStack()
+                }
+            }
         )
     }
 }
@@ -734,6 +783,46 @@ fun PremiumMessageBubble(
                         )
                 ) {
                     Column {
+                        // Quoted reply preview (if this message is a reply)
+                        if (message.replyToText != null) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 6.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(
+                                        if (isSent) Color.White.copy(alpha = 0.15f) else T.Surface3
+                                    )
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(3.dp)
+                                        .height(28.dp)
+                                        .clip(RoundedCornerShape(1.5.dp))
+                                        .background(if (isSent) Color.White else T.Purple)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = message.replyToSender ?: "Replied message",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSent) Color.White else T.Purple,
+                                        maxLines = 1
+                                    )
+                                    Text(
+                                        text = message.replyToText,
+                                        fontSize = 12.sp,
+                                        color = if (isSent) Color.White.copy(alpha = 0.85f) else T.TextSecondary,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+
                         // Message text
                         Text(
                             text = message.content,

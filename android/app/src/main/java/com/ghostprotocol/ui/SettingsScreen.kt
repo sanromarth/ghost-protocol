@@ -142,8 +142,9 @@ fun SettingsScreen(navController: NavController) {
                 Text("Power Management", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Current mode display
-                val currentMode = lastSnapshot?.currentMode ?: PowerMode.ECO
+                // Current mode display — observed live from GhostService
+                val activePolicy by com.ghostprotocol.GhostService.currentPowerPolicy.collectAsState()
+                val currentMode = activePolicy.mode
                 val modeColor = when (currentMode) {
                     PowerMode.ACTIVE -> Color(0xFF4CAF50)     // Green
                     PowerMode.ECO -> Color(0xFF2196F3)        // Blue
@@ -191,14 +192,15 @@ fun SettingsScreen(navController: NavController) {
                         OutlinedButton(
                             onClick = {
                                 val intent = Intent(context, com.ghostprotocol.GhostService::class.java).apply {
-                                    action = "ACTION_CYCLE_MODE"
+                                    action = "ACTION_SET_POWER_MODE"
+                                    putExtra("EXTRA_MODE", mode.name)
                                 }
                                 context.startService(intent)
-                                Toast.makeText(context, "Mode cycling — tap again to advance", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Power mode: ${mode.name} (1h override)", Toast.LENGTH_SHORT).show()
                             },
                             modifier = Modifier.weight(1f),
                             colors = if (isCurrentMode) {
-                                ButtonDefaults.outlinedButtonColors(containerColor = btnColor.copy(alpha = 0.15f))
+                                ButtonDefaults.outlinedButtonColors(containerColor = btnColor.copy(alpha = 0.25f))
                             } else {
                                 ButtonDefaults.outlinedButtonColors()
                             }
@@ -211,13 +213,30 @@ fun SettingsScreen(navController: NavController) {
                                     PowerMode.DEEP_SLEEP -> "SLEEP"
                                 },
                                 style = MaterialTheme.typography.labelSmall,
-                                fontWeight = if (isCurrentMode) FontWeight.Bold else FontWeight.Normal
+                                fontWeight = if (isCurrentMode) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isCurrentMode) btnColor else MaterialTheme.colorScheme.onSurface
                             )
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(
+                        onClick = {
+                            val intent = Intent(context, com.ghostprotocol.GhostService::class.java).apply {
+                                action = "ACTION_SET_POWER_MODE"
+                                putExtra("EXTRA_MODE", "AUTO")
+                            }
+                            context.startService(intent)
+                            Toast.makeText(context, "Reverted to dynamic AUTO power mode", Toast.LENGTH_SHORT).show()
+                        }
+                    ) {
+                        Text("Revert to Auto Mode", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // Last telemetry summary
                 lastSnapshot?.let { snap ->
