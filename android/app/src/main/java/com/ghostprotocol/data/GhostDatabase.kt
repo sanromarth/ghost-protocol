@@ -5,7 +5,7 @@ import androidx.room.*
 import com.ghostprotocol.power.TelemetryDao
 import com.ghostprotocol.power.TelemetryEntity
 
-@Database(entities = [Contact::class, MessageEntity::class, TelemetryEntity::class], version = 4, exportSchema = false)
+@Database(entities = [Contact::class, MessageEntity::class, TelemetryEntity::class], version = 5, exportSchema = false)
 abstract class GhostDatabase : RoomDatabase() {
     abstract fun contactDao(): ContactDao
     abstract fun messageDao(): MessageDao

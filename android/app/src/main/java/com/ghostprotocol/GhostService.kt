@@ -21,9 +21,13 @@ import com.ghostprotocol.data.GhostDatabase
 import com.ghostprotocol.data.MessageEntity
 import com.ghostprotocol.power.BatteryTelemetry
 import com.ghostprotocol.power.PowerMode
+import com.ghostprotocol.power.PowerPolicy
 import com.ghostprotocol.power.PowerPolicyEngine
 import com.ghostprotocol.power.TelemetrySnapshot
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import java.security.MessageDigest
 import java.util.UUID
@@ -31,6 +35,12 @@ import java.util.UUID
 import com.ghostprotocol.router.GhostRouter
 
 class GhostService : Service() {
+
+    companion object {
+        // TODO(v0.3): Use bound service + Messenger instead of static StateFlow
+        private val _currentPowerPolicy = MutableStateFlow(PowerPolicyEngine.DEFAULT_ECO_POLICY)
+        val currentPowerPolicy: StateFlow<PowerPolicy> = _currentPowerPolicy.asStateFlow()
+    }
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val TAG = "GHOST_BLE"
@@ -147,69 +157,83 @@ class GhostService : Service() {
     /**
      * Every 30 seconds: collect device state, compute policy, apply to BLE and router.
      */
+    private var lastAppliedPolicy: PowerPolicy? = null
+    private var lastMode: PowerMode? = null
+
+    private fun evaluateAndApplyPolicy(): PowerPolicy {
+        val batteryPercent = getBatteryLevel()
+        val isCharging = getChargingStatus()
+        val screenOn = isScreenOn()
+        val peerCount = BleManager.peers.value.size
+        val queueSize = getRouterQueueSize()
+        val timeSinceLastEncounter = System.currentTimeMillis() - lastEncounterTimeMs
+
+        val policy = powerPolicyEngine.updateInputs(
+            batteryPercent = batteryPercent,
+            isCharging = isCharging,
+            screenOn = screenOn,
+            peerCount = peerCount,
+            queueSize = queueSize,
+            timeSinceLastEncounterMs = timeSinceLastEncounter,
+            isMoving = null // Motion sensor not implemented yet
+        )
+
+        applyPowerPolicy(policy)
+        return policy
+    }
+
+    private fun applyPowerPolicy(policy: PowerPolicy) {
+        _currentPowerPolicy.value = policy
+
+        // Only update BLE and router when parameters actually change
+        val prev = lastAppliedPolicy
+        if (prev == null ||
+            prev.scanIntervalMs != policy.scanIntervalMs ||
+            prev.scanWindowMs != policy.scanWindowMs) {
+            BleManager.setScanPolicy(policy.scanIntervalMs, policy.scanWindowMs)
+        }
+
+        if (prev == null ||
+            prev.advertiseIntervalMs != policy.advertiseIntervalMs ||
+            prev.txPowerLevel != policy.txPowerLevel) {
+            BleManager.setAdvertisePolicy(policy.advertiseIntervalMs, policy.txPowerLevel)
+        }
+
+        if (prev == null || prev.relayWillingness != policy.relayWillingness) {
+            ghostRouter?.setRelayWillingness(policy.relayWillingness)
+        }
+
+        lastAppliedPolicy = policy
+
+        // Manage WakeLock
+        val wl = wakeLock
+        if (wl != null) {
+            if (!policy.wakeLockRequired && wl.isHeld) {
+                wl.release()
+                Log.d(TAG, ">>> WakeLock released (mode=${policy.mode})")
+            } else if (policy.wakeLockRequired && !wl.isHeld) {
+                wl.acquire(4 * 60 * 60 * 1000L)
+                Log.d(TAG, ">>> WakeLock acquired (mode=${policy.mode})")
+            }
+        }
+
+        // Log mode transitions
+        if (lastMode != policy.mode) {
+            Log.d(TAG, ">>> Power mode: ${policy.mode}, scan: ${policy.scanWindowMs}/${policy.scanIntervalMs}ms, relay: ${policy.relayWillingness}")
+            lastMode = policy.mode
+            updateNotification(policy.mode)
+        }
+    }
+
+    /**
+     * Every 30 seconds: collect device state, compute policy, apply to BLE and router.
+     */
     private fun startPolicyUpdateLoop() {
         serviceScope.launch {
-            var lastAppliedPolicy: com.ghostprotocol.power.PowerPolicy? = null
-            var lastMode: PowerMode? = null
             while (isActive) {
                 try {
                     cpuWakeupCount++
-                    val batteryPercent = getBatteryLevel()
-                    val isCharging = getChargingStatus()
-                    val screenOn = isScreenOn()
-                    val peerCount = BleManager.peers.value.size
-                    val queueSize = getRouterQueueSize()
-                    val timeSinceLastEncounter = System.currentTimeMillis() - lastEncounterTimeMs
-
-                    val policy = powerPolicyEngine.updateInputs(
-                        batteryPercent = batteryPercent,
-                        isCharging = isCharging,
-                        screenOn = screenOn,
-                        peerCount = peerCount,
-                        queueSize = queueSize,
-                        timeSinceLastEncounterMs = timeSinceLastEncounter,
-                        isMoving = null // Motion sensor not implemented yet
-                    )
-
-                    // Only update BLE and router when parameters actually change
-                    val prev = lastAppliedPolicy
-                    if (prev == null ||
-                        prev.scanIntervalMs != policy.scanIntervalMs ||
-                        prev.scanWindowMs != policy.scanWindowMs) {
-                        BleManager.setScanPolicy(policy.scanIntervalMs, policy.scanWindowMs)
-                    }
-
-                    if (prev == null ||
-                        prev.advertiseIntervalMs != policy.advertiseIntervalMs ||
-                        prev.txPowerLevel != policy.txPowerLevel) {
-                        BleManager.setAdvertisePolicy(policy.advertiseIntervalMs, policy.txPowerLevel)
-                    }
-
-                    if (prev == null || prev.relayWillingness != policy.relayWillingness) {
-                        ghostRouter?.setRelayWillingness(policy.relayWillingness)
-                    }
-
-                    lastAppliedPolicy = policy
-
-                    // Manage WakeLock
-                    wakeLock?.let { wl ->
-                        if (!policy.wakeLockRequired && wl.isHeld) {
-                            wl.release()
-                            Log.d(TAG, ">>> WakeLock released (mode=${policy.mode})")
-                        } else if (policy.wakeLockRequired && !wl.isHeld) {
-                            wl.acquire(4 * 60 * 60 * 1000L)
-                            Log.d(TAG, ">>> WakeLock acquired (mode=${policy.mode})")
-                        } else {
-                            // No change needed
-                        }
-                    }
-
-                    // Log mode transitions
-                    if (lastMode != policy.mode) {
-                        Log.d(TAG, ">>> Power mode: ${policy.mode}, scan: ${policy.scanWindowMs}/${policy.scanIntervalMs}ms, relay: ${policy.relayWillingness}")
-                        lastMode = policy.mode
-                        updateNotification(policy.mode)
-                    }
+                    evaluateAndApplyPolicy()
                 } catch (e: Exception) {
                     Log.e(TAG, ">>> Policy update error: ${e.message}")
                 }
@@ -348,17 +372,29 @@ class GhostService : Service() {
                 val hash = MessageDigest.getInstance("SHA-256").digest(senderPubKey)
                 val senderContactId = hash.sliceArray(0 until 8).joinToString("") { "%02x".format(it) }
 
+                // Reply wire format: senderName\u0000REPLY\u0000quotedSender\u0000quotedText\u0000message
+                // Backward-compatible: non-reply messages use senderName\u0000message (no REPLY token)
                 val rawText = String(plaintext, Charsets.UTF_8)
-
-                // Parse username + \0 + message (v0.1.4+), backward-compat with plain text
-                val nullIdx = rawText.indexOf('\u0000')
+                val parts = rawText.split('\u0000')
                 val senderName: String?
+                val replySender: String?
+                val replyText: String?
                 val text: String
-                if (nullIdx > 0) {
-                    senderName = rawText.substring(0, nullIdx)
-                    text = rawText.substring(nullIdx + 1)
+
+                if (parts.size >= 5 && parts[1] == "REPLY") {
+                    senderName = parts[0].ifEmpty { null }
+                    replySender = parts[2].ifEmpty { null }
+                    replyText = parts[3].ifEmpty { null }
+                    text = parts.drop(4).joinToString("\u0000")
+                } else if (parts.size >= 2) {
+                    senderName = parts[0].ifEmpty { null }
+                    replySender = null
+                    replyText = null
+                    text = parts.drop(1).joinToString("\u0000")
                 } else {
                     senderName = null
+                    replySender = null
+                    replyText = null
                     text = rawText
                 }
                 Log.d(TAG, ">>> ROUTED DECRYPT SUCCESS: from=$senderContactId text=\"$text\" verified=$isVerified")
@@ -381,9 +417,10 @@ class GhostService : Service() {
                     return@launch
                 }
                 // Content-based dedup: prevent duplicate spray deliveries
-                // Window is 5 seconds — enough to catch BLE re-delivery but allows repeated text
+                // Hashing ciphertext (which contains unique ephemeral keys and AES nonces)
+                // catches exact packet retransmissions while allowing distinct messages with the same text ("hi" + "hi").
                 val contentHash = MessageDigest.getInstance("SHA-256")
-                    .digest("$senderContactId:$text".toByteArray()).joinToString("") { "%02x".format(it) }
+                    .digest(ciphertext).joinToString("") { "%02x".format(it) }
                 val now = System.currentTimeMillis()
                 val lastSeen = recentMessageHashes.put(contentHash, now)
                 if (lastSeen != null && now - lastSeen < 5_000) {
@@ -398,7 +435,9 @@ class GhostService : Service() {
                     content = text,
                     isOutgoing = false,
                     timestamp = System.currentTimeMillis(),
-                    isVerified = isVerified
+                    isVerified = isVerified,
+                    replyToSender = replySender,
+                    replyToText = replyText
                 )
                 messageDao.insert(message)
                 Log.d(TAG, ">>> ROUTED MESSAGE SAVED: from '${senderName ?: contact.name}' text=\"$text\"")
@@ -485,6 +524,15 @@ class GhostService : Service() {
                                 BleManager.sendBatch(peer.address, blob) { success ->
                                     if (success) {
                                         messagesForwardedCount += count
+                                        // TODO(v0.3): Track individual message IDs through router for precise status updates.
+                                        // For v0.2, OnPeerDiscovered returns all pending messages for dst peer, so bulk update is safe.
+                                        serviceScope.launch(Dispatchers.IO) {
+                                            db.messageDao().updateStatusesForContact(
+                                                matchedContactId,
+                                                listOf(MessageEntity.STATUS_SPRAYED, MessageEntity.STATUS_PENDING),
+                                                MessageEntity.STATUS_SENT
+                                            )
+                                        }
                                     }
                                     Log.d(TAG, ">>> ROUTER BATCH result: ${if (success) "SUCCESS ($count messages)" else "FAILED"}")
                                 }
@@ -494,6 +542,15 @@ class GhostService : Service() {
                                 BleManager.sendMessage(peer.address, blob) { success ->
                                     if (success) {
                                         messagesForwardedCount++
+                                        // TODO(v0.3): Track individual message IDs through router for precise status updates.
+                                        // For v0.2, OnPeerDiscovered returns all pending messages for dst peer, so bulk update is safe.
+                                        serviceScope.launch(Dispatchers.IO) {
+                                            db.messageDao().updateStatusesForContact(
+                                                matchedContactId,
+                                                listOf(MessageEntity.STATUS_SPRAYED, MessageEntity.STATUS_PENDING),
+                                                MessageEntity.STATUS_SENT
+                                            )
+                                        }
                                     }
                                     Log.d(TAG, ">>> ROUTER SPRAY result: ${if (success) "SUCCESS" else "FAILED"}")
                                 }
@@ -617,17 +674,29 @@ class GhostService : Service() {
             val hash = md.digest(senderPubKey)
             val senderContactId = hash.sliceArray(0 until 8).joinToString("") { "%02x".format(it) }
 
+            // Reply wire format: senderName\u0000REPLY\u0000quotedSender\u0000quotedText\u0000message
+            // Backward-compatible: non-reply messages use senderName\u0000message (no REPLY token)
             val rawText = String(plaintext, Charsets.UTF_8)
-
-            // Parse username + \0 + message (v0.1.4+), backward-compat with plain text
-            val nullIdx = rawText.indexOf('\u0000')
+            val parts = rawText.split('\u0000')
             val senderName: String?
+            val replySender: String?
+            val replyText: String?
             val text: String
-            if (nullIdx > 0) {
-                senderName = rawText.substring(0, nullIdx)
-                text = rawText.substring(nullIdx + 1)
+
+            if (parts.size >= 5 && parts[1] == "REPLY") {
+                senderName = parts[0].ifEmpty { null }
+                replySender = parts[2].ifEmpty { null }
+                replyText = parts[3].ifEmpty { null }
+                text = parts.drop(4).joinToString("\u0000")
+            } else if (parts.size >= 2) {
+                senderName = parts[0].ifEmpty { null }
+                replySender = null
+                replyText = null
+                text = parts.drop(1).joinToString("\u0000")
             } else {
                 senderName = null
+                replySender = null
+                replyText = null
                 text = rawText
             }
             Log.d(TAG, ">>> DECRYPT SUCCESS: from contactId=$senderContactId text=\"$text\" verified=$isVerified")
@@ -650,8 +719,10 @@ class GhostService : Service() {
                 return
             }
             // Content-based dedup: prevent duplicate messages from BLE GATT retries
+            // Hashing the received encrypted data ensures GATT packet retries are dropped
+            // without dropping separate user messages with the same text.
             val contentHash = MessageDigest.getInstance("SHA-256")
-                .digest("$senderContactId:$text".toByteArray()).joinToString("") { "%02x".format(it) }
+                .digest(data).joinToString("") { "%02x".format(it) }
             val now = System.currentTimeMillis()
             val lastSeen = recentMessageHashes.put(contentHash, now)
             if (lastSeen != null && now - lastSeen < 5_000) {
@@ -667,7 +738,9 @@ class GhostService : Service() {
                 content = text,
                 isOutgoing = false,
                 timestamp = System.currentTimeMillis(),
-                isVerified = isVerified
+                isVerified = isVerified,
+                replyToSender = replySender,
+                replyToText = replyText
             )
             messageDao.insert(message)
             messagesDeliveredCount++
@@ -694,6 +767,25 @@ class GhostService : Service() {
                 Log.d(TAG, ">>> User tapped cycle mode")
                 cycleMode()
             }
+            "ACTION_SET_POWER_MODE" -> {
+                val modeStr = intent.getStringExtra("EXTRA_MODE")
+                Log.d(TAG, ">>> User requested power mode: $modeStr")
+                if (modeStr != null) {
+                    if (modeStr == "AUTO") {
+                        powerPolicyEngine.clearOverride()
+                        Log.d(TAG, ">>> Power mode: AUTO (override cleared)")
+                        evaluateAndApplyPolicy()
+                    } else {
+                        try {
+                            val mode = PowerMode.valueOf(modeStr)
+                            powerPolicyEngine.forceMode(mode, 3_600_000L) // 1 hour override
+                            evaluateAndApplyPolicy()
+                        } catch (e: Exception) {
+                            Log.e(TAG, ">>> Invalid power mode requested: $modeStr")
+                        }
+                    }
+                }
+            }
         }
         return START_STICKY
     }
@@ -712,11 +804,13 @@ class GhostService : Service() {
             PowerMode.DEEP_SLEEP -> {
                 powerPolicyEngine.clearOverride()
                 Log.d(TAG, ">>> Power mode: AUTO (override cleared)")
+                evaluateAndApplyPolicy()
                 return
             }
         }
         powerPolicyEngine.forceMode(nextMode, 3_600_000L) // 1 hour
         Log.d(TAG, ">>> Power mode forced: $nextMode (1 hour override)")
+        evaluateAndApplyPolicy()
     }
 
     /**

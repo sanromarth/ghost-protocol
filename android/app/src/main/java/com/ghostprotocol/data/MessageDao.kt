@@ -17,8 +17,14 @@ interface MessageDao {
     @Query("DELETE FROM messages")
     suspend fun deleteAll()
 
+    @Query("DELETE FROM messages WHERE id = :id")
+    suspend fun deleteById(id: String)
+
     @Query("UPDATE messages SET status = :status WHERE id = :id")
     suspend fun updateStatus(id: String, status: Int)
+
+    @Query("UPDATE messages SET status = :newStatus WHERE contactId = :contactId AND status IN (:oldStatuses)")
+    suspend fun updateStatusesForContact(contactId: String, oldStatuses: List<Int>, newStatus: Int)
 
     @Query("SELECT * FROM messages WHERE status = :status AND isOutgoing = 1")
     suspend fun getPendingMessages(status: Int = 0): List<MessageEntity>
