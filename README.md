@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/Android-8%2B-green" alt="Android 8+">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License">
   <img src="https://img.shields.io/badge/size-%3C50MB-blueviolet" alt="APK <50MB">
-  <img src="https://img.shields.io/badge/version-v0.3.5-orange" alt="Version v0.3.5">
+  <img src="https://img.shields.io/badge/version-v0.3.7-orange" alt="Version v0.3.7">
 </p>
 
 ---
@@ -35,23 +35,25 @@ Most "offline" mesh apps fall apart under real physical inspection:
 GHOST is engineered around real physical constraints:
 
 1. **Pairwise Encrypted Cell Groups (v0.3.5):** Private group chat for up to 8 members. No cleartext broadcast, no open IRC channels. Every outgoing group message generates separate pairwise envelopes encrypted with fresh ephemeral X25519 keys for each member. Intermediate carrier nodes cannot read anything.
-2. **Four Dynamic Security Postures (v0.3.0):**
+2. **End-to-End Delivery Receipts (v0.3.7):** Cryptographic proof of receipt (`✓✓`) signed by the destination phone after Room database insertion. Distinguishes between "GATT write succeeded" and "peer decrypted and stored the message."
+3. **Contact Introductions / Trust Web (v0.3.6):** Alice vouches for Bob so Carol can add him without an immediate QR scan. Alice signs Bob's public keys; Carol verifies Alice's signature against her pinned contact list. One-way trust is visually enforced (slate ring, `INTRODUCED` chip) until mutual verification.
+4. **Four Dynamic Security Postures (v0.3.0):**
    - `NORMAL`: Standard privacy. Discovery requires in-person QR scans. Default battery-saving BLE duty cycles.
    - `PROTEST`: High-readiness mesh. Scan rate increased to 1000ms / 200ms window. Background one-tap peer discovery active.
    - `EMERGENCY`: Continuous low-latency scanning (100% duty cycle). 100ms advertising bursts. Immediate packet forwarding.
    - `STEALTH`: Radio silence. BLE advertising transmitter completely killed. Passive receiver only (listen without beaconing).
-3. **Three Verification Methods:**
+5. **Three Verification Methods:**
    - **In-Person QR:** Zero-trust cryptographic key exchange with hardware dual-pulse heartbeat haptic confirmation.
    - **One-Tap Nearby Discovery (0x10/0x11):** Detects nearby peers in Protest Mode and sends authenticated consent handshakes without camera alignment.
    - **24-Hour Rotating BIP-39 Short Codes (0x20-0x23):** 3-word + 4-digit code (e.g., `LION - COBALT - HARBOR - 4821`) derived deterministically from the device's private seed and the current UTC epoch day. Can be spoken or written on a board across a crowd. Rotates automatically at midnight UTC.
-4. **Battery-Aware Duty Cycles:** Continuous BLE scanning kills an Android battery in under 4 hours. GHOST's `PowerPolicyEngine` dynamically throttles duty cycles across `ACTIVE`, `ECO`, `CRITICAL`, and `DEEP_SLEEP` modes. If battery drops below 20%, the phone sheds transit relaying burdens to keep the device alive.
-5. **Deterministic Dedup (RFC 8032):** In continuous scanning modes, duplicate radio packets arrive multiple times per second. GHOST deduplicates on 64-byte Ed25519 signatures over `(pubkey + plaintext)`, preserving deduplication across re-encryptions and multi-hop carrier relays.
+6. **Battery-Aware Duty Cycles:** Continuous BLE scanning kills an Android battery in under 4 hours. GHOST's `PowerPolicyEngine` dynamically throttles duty cycles across `ACTIVE`, `ECO`, `CRITICAL`, and `DEEP_SLEEP` modes. If battery drops below 20%, the phone sheds transit relaying burdens to keep the device alive.
+7. **Deterministic Dedup (RFC 8032):** In continuous scanning modes, duplicate radio packets arrive multiple times per second. GHOST deduplicates on 64-byte Ed25519 signatures over `(pubkey + plaintext)`, preserving deduplication across re-encryptions and multi-hop carrier relays.
 
 ---
 
 ## Wire Protocol Opcodes
 
-GHOST demuxes incoming GATT payloads at byte 0. Opcodes `0x10` through `0x23` and `0x40` are handled at the Kotlin protocol layer, while `0x01` and `0x30` route through the Go mesh engine:
+GHOST demuxes incoming GATT payloads at byte 0. Opcodes `0x10` through `0x23`, `0x40`, and `0x50` are handled at the Kotlin protocol layer, while `0x01` and `0x30` route through the Go mesh engine:
 
 | Opcode | Protocol | Purpose | Payload Format |
 |---|---|---|---|
@@ -64,6 +66,7 @@ GHOST demuxes incoming GATT payloads at byte 0. Opcodes `0x10` through `0x23` an
 | `0x23` | Short Code | Mesh Multi-Hop Code Response| `[1B 0x23][32B responderEd25519Pub][32B responderX25519Pub][64B sig]` |
 | `0x30` | Cell Group| Individual Unicast Envelope | `[1B 0x30][32B groupId][16B senderId][8B ts][ciphertext][64B sig]` |
 | `0x40` | Delivery Receipt | Cryptographic E2E Delivery Ack | `[1B 0x40][64B msgHash][16B recipientId][8B ts][64B sig]` |
+| `0x50` | Introduction | Cryptographic Voucher Envelope | `[1B 0x50][32B edPub][32B xPub][2B nameLen][name][16B voucherId][64B sig]` |
 
 ---
 
@@ -74,22 +77,23 @@ GHOST demuxes incoming GATT payloads at byte 0. Opcodes `0x10` through `0x23` an
 |                        ANDROID APPLICATION LAYER                        |
 |                                                                         |
 |   Jetpack Compose UI          SecurityPostureManager     PowerEngine    |
-|   - ContactList (CELL chip)   - NORMAL / PROTEST         - ACTIVE / ECO |
+|   - ContactList (CELL/INTRO)  - NORMAL / PROTEST         - ACTIVE / ECO |
 |   - GroupChat / GroupCreate   - EMERGENCY / STEALTH      - CRITICAL     |
 |   - HexagonAvatar / HUD       - 15% Battery Revert       - DEEP SLEEP   |
 |   - DoubleCheck (✓✓ purple)                                             |
+|   - IntroReviewBottomSheet                                              |
 |                                                                         |
 |   DiscoveryManager (0x10/0x11)   ShortCodeManager (0x20-0x23)           |
 |   - 1-Tap Consent Handshake      - BIP-39 2048-Word Dictionary          |
 |   - 20s Per-MAC Throttle         - UTC Midnight Key Rotation            |
 |                                                                         |
-|   Group Messaging Engine (0x30)  DeliveryReceiptHandler (0x40)          |
-|   - GroupMessageSender           - SHA-256 Content Hash Matching        |
-|   - GroupMessageReceiver         - First-Delivery Ed25519 Ack           |
-|   - Deterministic Sig Dedup      - 1:1 ✓✓ & Group X/Y Delivered Sheet   |
+|   Group Engine (0x30)  ReceiptHandler (0x40)  IntroHandler (0x50)       |
+|   - Pairwise Unicast   - SHA-256 Content Hash - 1-Way Voucher Verif     |
+|   - Sig Dedup Cache    - First-Delivery Ack   - 10m Pending Cache       |
+|                        - Double Check (✓✓)    - Slate Avatar / Chip     |
 |                                                                         |
-|   Room DB (Schema v8)                                                   |
-|   - contacts & messages (contentHash index)                             |
+|   Room DB (Schema v9)                                                   |
+|   - contacts (isIntroduced flag) & messages (contentHash index)         |
 |   - groups & group_messages (contentHash + deliveredMemberIdsJson)      |
 |   - telemetry_snapshots                                                 |
 +------------------------------------+------------------------------------+

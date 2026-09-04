@@ -1,9 +1,9 @@
 # GHOST Protocol Go Package API Reference
 
-> **Version:** v0.3.5 — reflects actual implemented code in `go/ghostrouter/`.
+> **Version:** v0.3.7 — reflects actual implemented code in `go/ghostrouter/`.
 > The `ghost-economy` and `ghost-mesh` packages described in RFCs do not exist yet.
 >
-> **v0.3.5 Payload Invariance:** The Go router core is transport-agnostic and treats payload bytes as opaque. In v0.3.0 (Protest Mode Short Codes `0x22`/`0x23`) and v0.3.5 (Cell Groups `0x30`), messages are routed transparently via standard unicast envelopes without modifying the Go router state machine.
+> **v0.3.7 Payload Invariance:** The Go router core is transport-agnostic and treats payload bytes as opaque. In v0.3.0 (Protest Mode Short Codes `0x22`/`0x23`), v0.3.5 (Cell Groups `0x30`), v0.3.7 (Delivery Receipts `0x40`), and v0.3.6 (Contact Introductions `0x50`), envelopes and mesh payloads route transparently via standard unicast envelopes without modifying the Go router state machine.
 
 ## ghostrouter (Implemented)
 

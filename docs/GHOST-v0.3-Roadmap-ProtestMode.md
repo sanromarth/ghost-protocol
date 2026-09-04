@@ -200,6 +200,36 @@ enum class SecurityPosture {
 [64 Bytes: Ed25519 Signature]
 ```
 
+### `CELL_GROUP_ENVELOPE` Packet (Opcode `0x30`)
+```
+[1 Byte: Opcode 0x30]
+[32 Bytes: Group ID (SHA-256)]
+[16 Bytes: Sender Contact ID]
+[8 Bytes: Timestamp (Milliseconds BE)]
+[Variable: AES-256-GCM Ciphertext]
+[64 Bytes: Ed25519 Signature]
+```
+
+### `DELIVERY_RECEIPT` Packet (Opcode `0x40`)
+```
+[1 Byte: Opcode 0x40]
+[64 Bytes: Content Hash Hex (SHA-256)]
+[16 Bytes: Recipient Contact ID]
+[8 Bytes: Timestamp (Milliseconds BE)]
+[64 Bytes: Ed25519 Signature over Hash]
+```
+
+### `INTRODUCTION_ENVELOPE` Packet (Opcode `0x50`)
+```
+[1 Byte: Opcode 0x50]
+[32 Bytes: Introduced Peer Ed25519 Public Key]
+[32 Bytes: Introduced Peer X25519 Public Key]
+[2 Bytes: Display Name Length (N BE)]
+[N Bytes: UTF-8 Display Name]
+[16 Bytes: Voucher Contact ID]
+[64 Bytes: Voucher Ed25519 Signature]
+```
+
 ---
 
 ## 6. Implementation Roadmap
@@ -209,8 +239,8 @@ enum class SecurityPosture {
 | **v0.2.0** | PowerPolicyEngine, Battery Telemetry, GATT Batching, Store-and-Forward Re-encounter Delivery | ✅ Complete (2026-09-02) |
 | **v0.3.0** | **Protest Mode:** Nearby BLE discovery with one-tap consent & 24h rotating BIP-39 short codes | ✅ Complete (2026-09-03) |
 | **v0.3.5** | **Cell Groups:** 8-member pairwise encrypted group chat, Room v7, Opcode `0x30` | ✅ Complete (2026-09-04) |
-| **v0.3.6** | Contact Introductions (Alice introduces Bob to Carol via signed encrypted envelope) | 📅 Next |
-| **v0.3.7** | End-to-end delivery receipts (`✓✓` opcode `0x40`) | 📅 Scheduled |
+| **v0.3.6** | **Contact Introductions:** Alice introduces Bob to Carol via signed encrypted envelope, Room v9, Opcode `0x50` | ✅ Complete (2026-09-04) |
+| **v0.3.7** | **Delivery Receipts:** End-to-end cryptographic delivery acks (`✓✓`), Room v8, Opcode `0x40` | ✅ Complete (2026-09-04) |
 | **v0.4.0** | Channel 0 Emergency Broadcast (local unencrypted multi-hop mesh alert bursts) | 📅 Scheduled |
 
 ---

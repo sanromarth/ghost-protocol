@@ -1,6 +1,6 @@
 # GHOST Protocol Performance Budgets
 
-> **Version:** v0.3.5 — Measured values from hardware testing across Android API 34 devices.  
+> **Version:** v0.3.7 — Measured values from hardware testing across Android API 34 devices.  
 > **Reference Device:** Android 8.0+ baseline (2GB RAM, quad-core Cortex-A53 @ 1.4GHz, BLE 5.0).
 
 ---
@@ -15,8 +15,8 @@
 | **Cell Group Fanout (3 peers)**| ~4–6s | Sequential pairwise GATT writes to in-range peers or Go router queueing. |
 | **Batched Burst Latency** | ~4s (5 msgs) | Single GATT connection setup with chained sequential writes, saving ~70% radio on-time. |
 | **Go Router Tests** | 15/15 passing (<0.05s) | BoltDB store, spray routing, batch serialization, and relay willingness gating. |
-| **Kotlin Unit Tests** | Passing (11s) | Room DAOs, GroupProtocol codec, BIP-39 HMAC derivation, signature verification. |
-| **Total Codebase** | ~10,200 LOC | Kotlin (~7.6k LOC), Go (~1.7k LOC), Rust (~0.3k LOC), Tests (~0.6k LOC). |
+| **Kotlin Unit Tests** | Passing (7s) | Room DAOs, GroupProtocol, ReceiptProtocol, IntroductionProtocol, BIP-39 HMAC, signature verification. |
+| **Total Codebase** | ~11,200 LOC | Kotlin (~8.4k LOC), Go (~1.7k LOC), Rust (~0.3k LOC), Tests (~0.8k LOC). |
 
 ---
 
@@ -24,7 +24,7 @@
 
 | Component | Language | RAM (Resident) | Storage (Disk) | CPU (Idle) | CPU (Active Burst) |
 |---|---|---|---|---|---|
-| **Android App + Compose UI** | Kotlin | ~45 MB | ~2 MB (Room DB v7 + cache) | 1–2% | 12% (render/layout) |
+| **Android App + Compose UI** | Kotlin | ~45 MB | ~2 MB (Room DB v9 + cache) | 1–2% | 12% (render/layout) |
 | **BLE Radio Subsystem** | Kotlin | ~6 MB | N/A | 1–3% (mode-dependent)| 15% (GATT transactions)|
 | **Rust Crypto Engine** | Rust | ~2 MB | ~300 KB per ABI (.so) | 0% | 5% (X25519/Ed25519) |
 | **Go Mesh Router (BoltDB)** | Go | ~5 MB | Up to 50 MB (pruned auto) | 1% (janitor loop) | 8% (Spray-and-Wait) |
@@ -67,9 +67,11 @@ Android BLE ATT MTU can be negotiated up to 512 bytes. Payloads under 509 bytes 
 0x20 Short Code Query:   ~129 bytes (32B hash + 32B edPub + 64B sig)                   --> 1 write
 0x21 Short Code Response:~129 bytes (32B edPub + 32B xPub + 64B sig)                   --> 1 write
 0x30 Cell Group Envelope:~281 bytes (32B groupId + 16B sender + 8B ts + 160B cipher + 64B sig) --> 1 write
+0x40 Delivery Receipt:   ~153 bytes (1B opcode + 64B msgHash + 16B recipient + 8B ts + 64B sig)  --> 1 write
+0x50 Contact Intro:      ~163 bytes (1B opcode + 32B edPub + 32B xPub + 2B nameLen + 16B name + 16B voucher + 64B sig) --> 1 write
 ```
 
-Every protocol packet in GHOST v0.3.5 is explicitly budgeted to remain well under the 509-byte single-write boundary, eliminating MTU fragmentation failures across varied Android vendor hardware.
+Every protocol packet in GHOST v0.3.7 is explicitly budgeted to remain well under the 509-byte single-write boundary, eliminating MTU fragmentation failures across varied Android vendor hardware.
 
 ---
 

@@ -1,6 +1,6 @@
 # GHOST Protocol Kotlin FFI Bridge Reference
 
-> **Version:** v0.3.5 — Technical reference for native JNI, gomobile, and subsystem coordination.  
+> **Version:** v0.3.7 — Technical reference for native JNI, gomobile, and subsystem coordination.  
 > **Platform:** Android AOSP / JNI / gomobile.
 
 ---
@@ -115,6 +115,12 @@ Opcode 0x21 / 0x23: BIP-39 Short Code Response (0x21 direct, 0x23 mesh)
 
 Opcode 0x30: Cell Group Individual Unicast Envelope
 [1B: 0x30] [32B: groupId raw] [16B: senderContactId utf8] [8B: timestamp BE] [ciphertext] [64B: ed25519Sig]
+
+Opcode 0x40: Cryptographic Delivery Receipt
+[1B: 0x40] [64B: messageHash hex] [16B: recipientContactId utf8] [8B: timestamp BE] [64B: ed25519Sig]
+
+Opcode 0x50: Cryptographic Contact Introduction
+[1B: 0x50] [32B: ed25519Pub] [32B: x25519Pub] [2B: nameLen BE] [max 32B: utf8 name] [16B: voucherContactId utf8] [64B: ed25519Sig]
 ```
 
 ---

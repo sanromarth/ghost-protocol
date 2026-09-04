@@ -111,3 +111,10 @@ stateDiagram-v2
 
 ## 15. State Machine Diagram
 (Refer to the mermaid diagram in Section 4 for the complete flow of UI states and transitions.)
+
+## 16. Tactical UI & Security State Extensions (v0.3.x)
+- **Security Posture HUD:** Compact header indicator and quick switch for `NORMAL`, `PROTEST`, `EMERGENCY`, and `STEALTH` modes with battery fail-safe (15% revert).
+- **Cell Groups (v0.3.5):** Hexagon avatars with deterministic hue, hard 2–8 member cap, verified-only contact picker, and quoted swipe-to-reply.
+- **Delivery Receipts (v0.3.7):** GhostPurple double checkmark (`✓✓`) for verified Room DB storage (`STATUS_DELIVERED = 2`); live `Delivered to X/Y` group tally with modal member detail sheet.
+- **Trust Web & Introductions (v0.3.6):** Distinct visual state for introduced peers (slate avatar border `#3F3F46`, `"INTRODUCED"` chip) without granting the violet Ghost Aura; persistent top banner in chat with one-tap transition to reciprocal QR verification.
+

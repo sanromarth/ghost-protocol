@@ -1,9 +1,9 @@
 # GHOST Protocol Rust Crate API Reference
 
-> **Version:** v0.3.5 — reflects actual implemented code in `rust/ghost-crypto/`.
+> **Version:** v0.3.7 — reflects actual implemented code in `rust/ghost-crypto/`.
 > The `ghost-common`, `ghost-physics`, `ghost-privacy`, `ghost-transport`, and `ghost-identity` crates described in RFCs do not exist yet.
 >
-> **v0.3.5 Primitive Invariance:** The 5 Rust cryptographic primitives (Identity Gen, X25519 ECDH + AES-256-GCM Encrypt/Decrypt, Ed25519 Sign/Verify) provide complete cryptographic coverage across all versions: 1:1 direct messages, v0.3.0 Protest Mode discovery handshakes (`0x20`/`0x21`), 24-hour rotating short codes (`0x22`/`0x23`), and v0.3.5 Cell Group pairwise envelopes (`0x30`). Zero changes to native Rust code were required.
+> **v0.3.7 Primitive Invariance:** The 5 Rust cryptographic primitives (Identity Gen, X25519 ECDH + AES-256-GCM Encrypt/Decrypt, Ed25519 Sign/Verify) provide complete cryptographic coverage across all versions: 1:1 direct messages, v0.3.0 Protest Mode discovery handshakes (`0x10`/`0x11`, `0x20`–`0x23`), v0.3.5 Cell Group pairwise envelopes (`0x30`), v0.3.7 Delivery Receipts (`0x40`), and v0.3.6 Contact Introductions (`0x50`). Zero changes to native Rust code were required.
 
 ## ghost-crypto (Implemented)
 

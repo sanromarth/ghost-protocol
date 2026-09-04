@@ -1,6 +1,6 @@
 # GHOST Protocol: An Offline Encrypted Mesh Messenger for Infrastructure-Denied Environments
 
-**Version 0.3.5 — September 2026**
+**Version 0.3.7 — September 2026**
 
 **Authors:** GHOST Protocol Research Group  
 **Repository:** [github.com/sanromarth/ghost-protocol](https://github.com/sanromarth/ghost-protocol)
@@ -13,13 +13,15 @@ GHOST (Global Hybrid Offline Secure Transport) is an offline mesh messaging syst
 
 Messages are routed through an embedded Spray-and-Wait epidemic routing engine implemented in Go with BoltDB persistence, enabling multi-hop delay-tolerant delivery through intermediate carrier nodes when sender and recipient are not within direct radio range. 
 
-**v0.3.5 introduces Protest Mode and Pairwise-Encrypted Cell Groups**:
+**v0.3.7 introduces Protest Mode, Pairwise Cell Groups, the Trust Web, and E2E Delivery Receipts**:
 1. **Dynamic Security Postures:** 4 runtime postures (`NORMAL`, `PROTEST`, `EMERGENCY`, `STEALTH`), including passive-only radio silence (`STEALTH`) to evade physical RF direction-finding equipment.
 2. **Frictionless Contact Discovery:** One-tap mutual consent BLE handshakes (opcodes `0x10`/`0x11`) and 24-hour rotating BIP-39 short codes (opcodes `0x20`–`0x23`) derived deterministically from the device's private seed and UTC epoch day, slashing setup latency from 30+ seconds to under 3 seconds without camera alignment.
 3. **Private Cell Groups:** Secure group messaging for up to 8 verified members using individual pairwise unicast envelopes (opcode `0x30`). Eliminates the cleartext broadcast leakage of Bridgefy, the public channel exposure of BitChat, and the unbounded forum storage replication of Briar.
 4. **Physical Power-Aware Mesh Management:** Centralized `PowerPolicyEngine` governing BLE duty cycles across 4 operating modes (`ACTIVE`, `ECO`, `CRITICAL`, `DEEP_SLEEP`), single-session GATT message batching (cutting connection radio time by ~70%), and automatic relay shedding when battery drops below 20%.
+5. **Trust Web & One-Way Vouching (v0.3.6):** Signed contact introduction envelopes (opcode `0x50`) allowing a mutual peer to introduce contacts without camera alignment, preserving strict one-way trust semantics and distinct UI trust states until in-person verification.
+6. **End-to-End Cryptographic Receipts (v0.3.7):** Signed delivery acknowledgments (opcode `0x40`) verifying that a destination device has decrypted and committed a message to Room database storage, eliminating false delivery confidence from transport-only write ACKs.
 
-The codebase comprises approximately 10,200 lines across three languages: Kotlin (~7.6k LOC: UI, BLE, Postures, Room DB v7), Go (~1.7k LOC: mesh routing and BoltDB storage), and Rust (~0.3k LOC: cryptography via JNI). All capabilities have been empirically verified across physical Android hardware.
+The codebase comprises approximately 11,200 lines across three languages: Kotlin (~8.4k LOC: UI, BLE, Postures, Room DB v9, Receipts, Introductions), Go (~1.7k LOC: mesh routing and BoltDB storage), and Rust (~0.3k LOC: cryptography via JNI). All capabilities have been empirically verified across physical Android hardware.
 
 ---
 
@@ -45,10 +47,12 @@ Existing offline mesh messaging applications fall into severe engineering traps:
 
 GHOST takes a pragmatic engineering approach: **implement audited cryptographic primitives, bound mesh amplification, and strictly enforce physical energy constraints.**
 
-| Dimension | Briar | Bridgefy | BitChat | GHOST v0.3.5 |
+| Dimension | Briar | Bridgefy | BitChat | GHOST v0.3.7 |
 |---|---|---|---|---|
 | **E2E Encryption** | ✅ E2E (Bramble) | ❌ Partial (Broadcast is cleartext) | ⚠️ Channel password | ✅ **X25519 + AES-256-GCM** |
 | **Group Chat Model** | Unbounded Forums | Plaintext Broadcast | Public `#mesh` channels | ✅ **Pairwise Envelopes (max 8)** |
+| **Delivery Receipts** | App-level ACK | None | None | ✅ **Cryptographic E2E (✓✓)** |
+| **Contact Vouching** | None (manual) | None | None | ✅ **Signed 1-Way Vouching (0x50)** |
 | **Multi-Hop Relay** | ❌ (Contacts only) | ✅ Unicast relay | ✅ Flood mesh | ✅ **Bounded Spray-and-Wait ($L=4$)** |
 | **Power Management** | ❌ Static (~15%/day) | ❌ Unmanaged (~3h life) | ⚠️ Unmanaged | ✅ **4 Dynamic Modes (0.2–4%/hr)** |
 | **Relay Load Shedding** | ❌ None | ❌ None | ❌ None | ✅ **Drops relaying if battery < 20%** |
@@ -113,17 +117,56 @@ GHOST v0.3.5 rejects the broadcast-cleartext approach of Bridgefy and the public
 
 ---
 
-## 5. Deployment & Hardware Verification
+## 5. Trust Web: Cryptographic Contact Introductions
+
+In decentralized networks operating under threat, key distribution cannot rely on central PKIs or trust-on-first-use (TOFU). Physical QR exchange remains GHOST's gold standard for mutual verification. However, operating cells require a mechanism for mutual contacts to vouch for new peers out of band.
+
+GHOST v0.3.6 introduces **Contact Introductions (Opcode `0x50`)**:
+
+```
+[1B: 0x50][32B: BobEdPub][32B: BobXPub][2B: NameLen][UTF-8 Name][16B: VoucherId][64B: AliceSig]
+```
+
+### Protocol Mechanics:
+1. **Cryptographic Vouching:** Alice (mutually verified with both Bob and Carol) generates an introduction envelope. Alice signs `(0x50 || Bob.ed25519Pub || Bob.x25519Pub || nameLen || name || Carol.contactId || Alice.contactId)` using her Ed25519 seed.
+2. **End-to-End Transit:** The introduction envelope is encrypted with fresh ephemeral X25519 keys to Carol's public key and transmitted via standard 1:1 mesh transport. Relays cannot read the vouching data.
+3. **One-Way Trust Invariant:** Alice introduces Bob to Carol. Carol receives Bob's public keys. Crucially, Bob is not notified and does not receive Carol's public keys. There is no automated bidirectional graph synchronization that could leak roster membership.
+4. **Visual Honesty:** Carol inspects Alice's attestation in `IntroductionReviewBottomSheet`. When accepted, Bob is inserted as `isIntroduced = true` and `isVerified = false`. Bob's contact renders with a slate border (`#3F3F46`) and an `"INTRODUCED"` chip. Bob never receives the violet Ethereal Ring (Ghost Aura) until Alice or Carol performs a direct, mutual in-person QR or Discovery verification.
+
+---
+
+## 6. End-to-End Cryptographic Delivery Receipts
+
+In mesh networks without synchronous acknowledgments, transport-level status (`STATUS_SENT` / `✓`) only verifies that local radio hardware completed a GATT write to a peer's Bluetooth stack. It provides zero assurance that the payload was decrypted or persisted by the recipient.
+
+GHOST v0.3.7 introduces **Cryptographic Delivery Receipts (Opcode `0x40`)**:
+
+```
+[1B: 0x40][64B: ContentHash Hex][16B: RecipientContactId][8B: Timestamp BE][64B: Ed25519 Signature]
+```
+
+### Protocol Mechanics:
+1. **Deterministic Content Hash:** Upon receiving and successfully committing a message to Room database storage, the destination node computes:
+   $$\text{ContentHash} = \text{SHA-256}(\text{SenderContactId} \parallel \text{Timestamp}_{\text{BE}} \parallel \text{Plaintext})$$
+   To prevent clock skew between sender and receiver, 1:1 messages transmit an explicit `TS\0timestamp` wire token that is stripped prior to database storage.
+2. **Signed Acknowledgment:** The destination node signs the content hash using its private Ed25519 identity seed. The resulting 153-byte packet is written back across the mesh.
+3. **Receipt Storm Prevention:** Receipts trigger strictly upon initial database insertion (`getByContentHash == null`). Duplicate deliveries from multi-hop spray copies or encounter flushes are dropped silently. Opcode `0x40` packets are terminal (never trigger return receipts), and system event notices are filtered.
+4. **Visual Verification:** Senders match incoming receipts against Room DB by content hash, transitioning message status to `STATUS_DELIVERED` (2) and rendering the GhostPurple double checkmark (`✓✓`). In Cell Groups, delivery progress is aggregated per-member (`"Delivered to X/Y"`).
+
+---
+
+## 7. Deployment & Hardware Verification
 
 GHOST runs as a single, standalone debug APK (~46 MB including dual ABIs; release build ~18 MB). It requires no internet permissions, no account setup, and zero Google Play Services.
 
 Verified operational parameters on physical hardware:
 - **Direct BLE Latency:** 2–4 seconds.
 - **Cell Group Fanout:** 4–6 seconds (3 peers).
+- **Delivery Receipt Round-Trip:** 3–5 seconds (direct BLE).
 - **Battery Drain (ECO):** ~1.5–2.0% per hour.
 - **Battery Drain (CRITICAL):** <0.5% per hour.
 - **Cold Start:** ~1.5 seconds.
-- **Database:** Room schema version 7 (`GhostDatabase`).
+- **Database:** Room schema version 9 (`GhostDatabase`).
 
 ---
 

@@ -36,6 +36,40 @@ Major feature release implementing **Delivery Receipts** (`✓✓`) — end-to-e
 
 ---
 
+## [v0.3.6] — 2026-09-04
+
+Feature release implementing **Contact Introductions (Trust Web)** — one-way cryptographic vouching (Opcode `0x50`) allowing a mutual verified contact (Alice) to introduce Bob to Carol via signed encrypted envelopes without requiring physical QR code scanning.
+
+### Added
+- **Cryptographic Introduction Envelope (Opcode `0x50`):**
+  - Wire protocol for one-way key vouching:
+    `[1B: 0x50][32B: Bob ed25519Pub][32B: Bob x25519Pub][2B: nameLen BE][N: name UTF-8][16B: voucherContactId][64B: Alice Ed25519 signature]`
+  - Alice signs `(0x50 || Bob.ed25519Pub || Bob.x25519Pub || nameLen || name || Carol.contactId || Alice.contactId)`.
+  - Signature is verified by Carol against Alice's pinned Ed25519 public key.
+  - Wire envelope size is ~163 bytes (for 16-char name), fitting into a single BLE GATT write without fragmentation.
+  - Transport agnostic: encrypted to Carol's X25519 public key and routed over standard 1:1 mesh transport without modifying the Go router or Rust crypto engine.
+- **One-Way Trust Invariants:**
+  - Alice introduces Bob to Carol. Carol receives Bob's identity keys and attribution.
+  - Bob is not automatically notified and does not receive Carol's keys (no bidirectional graph sync).
+  - Carol can initiate messages to Bob once added.
+- **Visual Distinction & Trust Integrity:**
+  - Introduced contacts (`isIntroduced = true && isVerified = false`) render with a slate border (`#3F3F46`) and a small `"INTRODUCED"` chip.
+  - Introduced contacts **never** receive the violet Ethereal Ring (Ghost Aura) until mutually verified in person via QR or Protest Mode Discovery.
+  - Chat screen displays a persistent top banner: *"Introduced by Alice — not mutually verified"* with a direct tap action to open QR verification.
+- **Room Database Migration v8 → v9 (`MIGRATION_8_9`):**
+  - Added `isIntroduced` column (`INTEGER NOT NULL DEFAULT 0`) to `contacts` table.
+  - Preserves introduction flags across contact re-insertions and verification upgrades.
+- **In-Memory Introduction Lifecycle (`IntroductionHandler.kt`):**
+  - Pending introductions cached in memory with a 10-minute expiry window.
+  - Silent arrival: high-priority notification posted without vibration or heartbeat haptics to prevent acoustic detection in sensitive environments.
+  - Terminal packet demux: opcode `0x50` intercepts immediately after decryption, preventing envelope insertion into message chat logs and suppressing delivery receipts.
+- **User Interface Components:**
+  - `IntroductionReviewBottomSheet`: Shows voucher details with Ghost Aura avatar, introduced contact card with fingerprint and `"INTRODUCED"` badge, cryptographic disclaimer, and "Add Contact" / "Decline" actions.
+  - `IntroduceContactDialog`: Accessible from `ContactInfoBottomSheet` for mutually verified contacts, listing eligible verified recipients with confirmation dialog.
+  - System notices: Logs `* You introduced Bob to Carol *` in Alice's local chat, and `* Alice introduced Bob to you *` in Carol's chat with Alice upon acceptance.
+
+---
+
 ## [v0.3.5] — 2026-09-04
 
 Major feature release implementing **Cell Groups** — private, verified group chat for up to 8 members using pairwise end-to-end encryption.

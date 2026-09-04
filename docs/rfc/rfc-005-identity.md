@@ -108,3 +108,10 @@ stateDiagram-v2
 ### 12.2 Protest Mode Discovery (v0.3 Specification)
 - **Nearby One-Tap Consent:** Discovered BLE 4-byte fingerprints trigger high-priority prompts. One-tap approval initiates mutual GATT key bundle exchange in <3 seconds without cameras.
 - **24-Hour Rotating Short Codes:** `BIP-39[Seed(4)] || Nonce` derived from `HMAC-SHA256(PrivKey, EpochDay)` for verbal, sign, or radio exchange. Resolved via local mesh encounter cache.
+
+### 12.3 Cryptographic Contact Introductions (Trust Web - v0.3.6)
+- **One-Way Cryptographic Vouching:** Alice (mutually verified by both parties) introduces Bob to Carol by generating a signed encrypted envelope (Opcode `0x50`).
+- **Wire Format:** `[1B 0x50][32B BobEdPub][32B BobXPub][2B NameLen][UTF-8 Name][16B VoucherId][64B AliceSig]`.
+- **Cryptographic Attestation:** Alice signs `(0x50 || BobEdPub || BobXPub || NameLen || Name || CarolId || AliceId)` with her Ed25519 seed. Carol validates the signature against Alice's pinned Ed25519 public key.
+- **One-Way Trust Invariant:** Bob is not notified and does not receive Carol's public keys. Carol stores Bob with `isIntroduced = true` and `isVerified = false` (slate border, `INTRODUCED` chip).
+- **Trust Promotion:** Bob never receives the violet Ghost Aura until Bob and Carol perform a mutual in-person QR exchange or Nearby Discovery handshake.

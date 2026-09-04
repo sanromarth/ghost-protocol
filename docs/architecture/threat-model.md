@@ -1,13 +1,13 @@
 # GHOST Protocol Threat Model
 
-> **Version:** v0.3.5 — Engineering assessment of physical protections, cryptographic bounds, and exposed attack surfaces.  
-> **Evaluated:** 2026-09-04 following Protest Mode & Cell Groups integration.
+> **Version:** v0.3.7 — Engineering assessment of physical protections, cryptographic bounds, and exposed attack surfaces.  
+> **Evaluated:** 2026-09-04 following Protest Mode, Cell Groups, Contact Introductions, and Delivery Receipts integration.
 
 ---
 
 ## 1. Threat Actors & Physical Realities
 
-| Threat Actor | Capabilities | GHOST v0.3.5 Status | Engineering Mitigations & Constraints |
+| Threat Actor | Capabilities | GHOST v0.3.7 Status | Engineering Mitigations & Constraints |
 |---|---|---|---|
 | **Passive RF Sniffer** | Captures 2.4GHz BLE advertising and GATT packets | ✅ **Protected** | Payloads encrypted via X25519 ECDH + AES-256-GCM. Relays cannot decrypt transit blobs. |
 | **Active Radio Scanner / Direction Finder** | Locates transmitting Bluetooth radios with directional antennas | ⚠️ **Conditional** | In `STEALTH` posture, the advertising transmitter is completely shut down (listen-only). In `NORMAL`/`PROTEST`, transmitting radio emissions can be physically located within ~10–30 meters. |
@@ -20,7 +20,7 @@
 
 ---
 
-## 2. What v0.3.5 Protects
+## 2. What v0.3.7 Protects
 
 ### 2.1 Confidentiality & Forward Secrecy
 - **Every Message Encrypted:** Plaintext is encrypted using X25519 ECDH key agreement combined with AES-256-GCM authenticated encryption.
@@ -31,13 +31,21 @@
 - **Deterministic Digital Signatures (RFC 8032):** Senders sign `(senderEd25519Pub || plaintext)` using Ed25519. Digital signatures are verified by the recipient before saving to disk.
 - **Why Ciphertext Hashing Failed:** Earlier alpha builds attempted to deduplicate on `SHA-256(ciphertext)`. Because each transmission generates fresh ephemeral keys and AES nonces, ciphertexts were completely different, causing duplicate messages to slip past the filter under continuous BLE scanning. Signing over canonical plaintext produces an invariant 64-byte signature that catches duplicates across re-encryptions and multi-hop carrier relays.
 
-### 2.3 Denial-of-Sleep & Radio Protection
+### 2.3 Receipt Authenticity & Loop Prevention (v0.3.7)
+- **Signed Delivery Acknowledgments:** Opcode `0x40` delivery receipts are authenticated by the recipient's Ed25519 signature over the computed message content hash `SHA-256(senderId || timestamp || plaintext)`. An attacker cannot forge receipts without possessing the recipient's private Ed25519 seed.
+- **Terminal Packet Dispatch:** Opcode `0x40` packets never trigger delivery receipts themselves, preventing acknowledgment cascades. System event notices (`* ` prefix) are similarly filtered.
+
+### 2.4 Cryptographic Vouching & One-Way Trust (v0.3.6)
+- **Voucher Authentication:** Opcode `0x50` introduction envelopes are signed by the introducing contact (Alice). Carol validates Alice's signature against her pinned contact list before presenting the contact for review. Unverified vouchers or tampered signatures are dropped silently.
+- **Honest Trust Boundaries:** Introduced contacts are strictly one-way: Bob is not notified and does not receive Carol's public keys. Introduced contacts are persisted with `isIntroduced = true, isVerified = false` (slate avatar ring, `INTRODUCED` chip) and never receive the violet Ghost Aura until mutually verified via QR or Discovery.
+
+### 2.5 Denial-of-Sleep & Radio Protection
 - **Relay Load Shedding:** When device battery drops below 20%, `PowerPolicyEngine` sets `relayWillingness = 0.0` in the Go router. The node stops accepting forwarded messages from other phones, acting strictly as an edge node to keep the device alive.
 - **20-Second Per-MAC Discovery Limiter:** In `PROTEST` mode, background discovery packets (`0x10`) are limited to 3 per minute per MAC address, preventing an adversary with a laptop from spamming notifications across a crowd.
 
 ---
 
-## 3. What v0.3.5 Does NOT Protect (Known Limitations)
+## 3. What v0.3.7 Does NOT Protect (Known Limitations)
 
 ### 3.1 Metadata Leakage Over BLE
 - **4-Byte Key Fingerprint:** To match peers without initiating a GATT connection, devices advertise a 4-byte hash: `SHA-256(ed25519Pub)[0..3]`. While Android rotates MAC addresses, this 4-byte fingerprint remains constant across advertisements until posture is changed. A stationary BLE sniffer can track when this fingerprint enters and leaves radio range.
