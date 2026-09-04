@@ -203,13 +203,14 @@ enum class SecurityPosture {
 ---
 
 ## 6. Implementation Roadmap
-
+ 
 | Milestone | Deliverable | Status |
 |---|---|---|
-| **v0.2.0** | PowerPolicyEngine, Battery Telemetry, GATT Batching, Store-and-Forward Re-encounter Delivery | ✅ Complete |
-| **v0.2.5** | Contact Introductions (Alice introduces Bob to Carol via signed encrypted envelope) | ⏳ In Design |
-| **v0.3.0** | **Protest Mode:** Nearby BLE discovery with one-tap consent & 24h rotating BIP-39 short codes | 📅 Planned Next |
-| **v0.3.5** | End-to-end delivery receipts (`✓✓` protocol), multi-peer group chat | 📅 Scheduled |
+| **v0.2.0** | PowerPolicyEngine, Battery Telemetry, GATT Batching, Store-and-Forward Re-encounter Delivery | ✅ Complete (2026-09-02) |
+| **v0.3.0** | **Protest Mode:** Nearby BLE discovery with one-tap consent & 24h rotating BIP-39 short codes | ✅ Complete (2026-09-03) |
+| **v0.3.5** | **Cell Groups:** 8-member pairwise encrypted group chat, Room v7, Opcode `0x30` | ✅ Complete (2026-09-04) |
+| **v0.3.6** | Contact Introductions (Alice introduces Bob to Carol via signed encrypted envelope) | 📅 Next |
+| **v0.3.7** | End-to-end delivery receipts (`✓✓` opcode `0x40`) | 📅 Scheduled |
 | **v0.4.0** | Channel 0 Emergency Broadcast (local unencrypted multi-hop mesh alert bursts) | 📅 Scheduled |
 
 ---

@@ -26,14 +26,15 @@ class GroupMessageReceiver(
     private val groupDao: GroupDao,
     private val contactDao: ContactDao,
     private val groupMessageDao: GroupMessageDao,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    private val sharedSignatureCache: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
 ) {
     companion object {
         private const val TAG = "GHOST_GROUP"
     }
 
-    // Dedup cache: Signature hex -> timestamp (prevents duplicates from multi-hop mesh relays)
-    private val recentSignatures = ConcurrentHashMap<String, Long>()
+    // Dedup cache: Signature hex -> timestamp (shared instance with 1:1 message pipeline)
+    private val recentSignatures: ConcurrentHashMap<String, Long> = sharedSignatureCache
 
     fun onGroupMessageReceived(data: ByteArray) {
         if (data.size < GroupProtocol.MIN_ENVELOPE_SIZE) return

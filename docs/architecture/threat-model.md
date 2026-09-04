@@ -1,103 +1,71 @@
 # GHOST Protocol Threat Model
 
-> **Version:** v0.2.0 — honest engineering assessment of protections and attack surfaces.
-> Evaluated following v0.1.5 stability audit and v0.2.0 power/routing hardening.
+> **Version:** v0.3.5 — Engineering assessment of physical protections, cryptographic bounds, and exposed attack surfaces.  
+> **Evaluated:** 2026-09-04 following Protest Mode & Cell Groups integration.
 
-## 1. Threat Actors
+---
 
-| Actor | Can Attack v0.2.0? | Details |
-|---|---|---|
-| **Passive eavesdropper** | ✅ Mitigated | AES-256-GCM + ephemeral X25519 per message |
-| **Relay flood / Battery drainer** | ✅ Mitigated | `PowerPolicyEngine` throttles radio; `relayWillingness` drops transit packets under 20% battery |
-| **Replay attacker** | ✅ Mitigated | 60s sliding window deduplicates on ciphertext (unique ephemeral nonces) |
-| **Local adversary (physical access)** | ⚠ Partially mitigated | Keys in app-private storage. No PIN/biometric lock. |
-| **Network adversary (malicious relay)** | ⚠ Partially mitigated | Cannot read/forge messages. Can drop transit blobs. |
-| **State-level adversary** | ❌ Not mitigated | BLE traffic analysis reveals device proximity and cluster graphs |
-| **Quantum adversary** | ❌ Not mitigated | Classical X25519/Ed25519 only |
+## 1. Threat Actors & Physical Realities
 
-## 2. What v0.2.0 Actually Protects
-
-### ✅ Tier 1: Resilience & Battery Protection
-- **Memory Safety:** Rust FFI panics across boundaries eliminated.
-- **Concurrency:** Go router deadlocks and BoltDB lock contention resolved.
-- **Denial-of-Sleep / Battery Exhaustion:** Malicious peers flooding relay requests cannot drain a dying phone. At battery < 20%, `relayWillingness` drops to 0.0, discarding transit blobs before disk write.
-- **Connection Storms:** Concurrent GATT connections serialized to prevent Android error 133.
-- **Collision & Replay Resistance:** Message hashing uses ciphertext (including ephemeral nonce).
-
-### ✅ Tier 1: Confidentiality
-- **E2E encryption:** Every message encrypted with X25519 ECDH + AES-256-GCM.
-- **Forward secrecy:** Fresh ephemeral X25519 keypair per message.
-- **Relay blindness:** Relay nodes handle opaque binary blobs. Content, sender identity, and recipient public keys are encrypted.
-
-### ✅ Tier 1: Integrity & Authentication
-- **Ed25519 digital signatures:** Authenticates sender and prevents payload tampering.
-- **AEAD authentication tag:** Bit-flip attacks detected by GCM.
-- **Zero-TOFU QR Exchange:** Cryptographic identity exchanged in-person.
-- **Reciprocal Mutual Verification:** Two-way verification confirms both parties scanned each other before activating the signature Ghost Aura (animated Ethereal Ring) on the peer's avatar.
-
-## 3. What v0.2.0 Does NOT Protect
-
-### ⚠ Tier 2: Metadata (PARTIALLY EXPOSED)
-| Metadata | Status | Why |
-|---|---|---|
-| **Who talks to whom** | Exposed | BLE fingerprints (4 bytes of SHA-256) are broadcast in clear. Any BLE scanner sees which devices interact |
-| **When messages are sent** | Exposed | No cover traffic. Timing analysis trivially reveals communication patterns |
-| **Device location** | Exposed | BLE signal is detectable within ~10m. Directional antenna extends this |
-| **Message size** | Exposed | No padding to fixed size. Message length is visible in BLE GATT write |
-
-### ❌ Tier 3: Advanced Attacks (NOT MITIGATED)
-| Attack | v0.1.5 Status |
-|---|---|
-| **RF jamming** | Single transport (BLE). Jamming 2.4GHz blocks all communication. No ultrasonic/IR fallback. |
-| **Traffic analysis / social graph** | No cover traffic, no packet morphing. Adversary with BLE sniffer maps the entire network graph. |
-| **Sybil attack** | No proof-of-personhood. Any device can generate unlimited identities and join the mesh. |
-| **Relay manipulation** | Malicious relay can selectively drop messages. No accountability or reputation system. |
-| **Eclipse attack** | Attacker surrounds a target with colluding nodes. All sprayed copies go to attacker. No defense. |
-
-### ❌ Tier 4: Device Compromise (NOT MITIGATED)
-| Attack | v0.1.5 Status |
-|---|---|
-| **Device seizure** | Keys stored in app-private dir, not hardware enclave. Root access = key extraction. |
-| **No dead-man switch** | No auto-wipe after failed attempts. No remote wipe. |
-| **Key recovery** | No Shamir secret sharing. Key loss = permanent identity loss. |
-| **Biometric lock** | None. Anyone with physical access to unlocked phone can read all messages. |
-
-## 4. Honest Security Comparison
-
-| Feature | GHOST v0.1.5 | Signal | Briar |
+| Threat Actor | Capabilities | GHOST v0.3.5 Status | Engineering Mitigations & Constraints |
 |---|---|---|---|
-| E2E encryption | ✅ X25519 + AES-256-GCM | ✅ Double Ratchet | ✅ |
-| Forward secrecy | ✅ Ephemeral per message | ✅ Per message | ✅ |
-| No server required | ✅ | ❌ | ✅ |
-| Cover traffic | ❌ | ❌ | ❌ |
-| Traffic analysis resistance | ❌ | ❌ | ⚠ (Tor) |
-| Post-quantum | ❌ | ✅ (PQXDH) | ❌ |
-| Multi-transport | ❌ | N/A | ⚠ (WiFi/BT) |
-| Sybil resistance | ❌ | ✅ (phone number) | ❌ |
+| **Passive RF Sniffer** | Captures 2.4GHz BLE advertising and GATT packets | ✅ **Protected** | Payloads encrypted via X25519 ECDH + AES-256-GCM. Relays cannot decrypt transit blobs. |
+| **Active Radio Scanner / Direction Finder** | Locates transmitting Bluetooth radios with directional antennas | ⚠️ **Conditional** | In `STEALTH` posture, the advertising transmitter is completely shut down (listen-only). In `NORMAL`/`PROTEST`, transmitting radio emissions can be physically located within ~10–30 meters. |
+| **Malicious Mesh Relay (Carrier)** | Stores and sprays transit messages; attempts to read or tamper | ✅ **Protected** | Carrier nodes see only opaque blobs. AEAD tags prevent bit-flipping; Ed25519 signatures prevent sender spoofing. In Cell Groups, pairwise envelopes ensure relays cannot inspect member rosters. |
+| **Replay / Flooding Attacker** | Replays captured BLE packets to waste battery or duplicate bubbles | ✅ **Protected** | Receiver deduplicates using deterministic 64-byte Ed25519 digital signatures over `(pubkey + plaintext)` (RFC 8032) across a 60s sliding window. Packets with matching signatures are dropped before Room insertion. |
+| **Probe / Scanner Attack** | Broadcasts random short code queries to fish for active identities | ✅ **Protected** | `ShortCodeManager` silently drops mismatched query hashes. Zero radio packets are transmitted in response to an incorrect probe. |
+| **Compromised Phone (Physical Access / Forensic Extraction)** | Law enforcement or adversary seizes unlocked or rooted phone | ❌ **Unprotected** | Keys are stored in Android app-private storage (`/data/data/com.ghostprotocol/shared_prefs/`). A rooted device or unlocked extraction allows reading the database directly. No biometric or duress PIN is implemented yet. |
+| **Traffic Timing & Cluster Analyst** | Analyzes packet timestamps and device proximities | ❌ **Unprotected** | No cover traffic or fixed-size packet morphing exists. An adversary monitoring an entire protest area can deduce which devices are exchanging data based on packet arrival timing and BLE fingerprints. |
+| **Quantum Adversary** | Captures traffic for post-quantum decryption | ❌ **Unprotected** | Classical X25519 / Ed25519 only. Post-quantum hybrid schemes (ML-KEM / Kyber) are slated for v1.0. |
 
-## 5. Security Assumptions
+---
 
-- Android app sandbox is not compromised (root = game over)
-- BLE hardware is not backdoored
-- The user verifies QR codes in-person (no MITM on the initial exchange)
-- Ed25519 and X25519 remain computationally secure (classical adversary only)
+## 2. What v0.3.5 Protects
 
-## 6. Residual Risks
+### 2.1 Confidentiality & Forward Secrecy
+- **Every Message Encrypted:** Plaintext is encrypted using X25519 ECDH key agreement combined with AES-256-GCM authenticated encryption.
+- **Fresh Ephemeral Keys:** A new ephemeral X25519 keypair is generated for every single message. Compromise of an identity key does not retroactively decrypt past intercepted sessions.
+- **Pairwise Group Isolation:** Unlike Bridgefy (which broadcasts group messages in cleartext) or BitChat (which posts to public channels), GHOST Cell Groups encrypt separate envelopes per member. Intermediate carriers carrying group bundles see only opaque payloads and cannot determine who else is in the group.
 
-- **Store-now-decrypt-later:** Adversary captures BLE traffic now, waits for quantum computers to break X25519. PQ crypto planned for v1.0.
-- **Rubber hose cryptanalysis:** Physical coercion. No technical mitigation possible.
-- **Android baseband exploits:** Out of scope — requires OS-level defense.
-- **Username leakage:** v0.1.5 embeds username in encrypted payload. If the encryption key is compromised, the username is exposed along with the message.
+### 2.2 Authenticity & Deduplication Invariants
+- **Deterministic Digital Signatures (RFC 8032):** Senders sign `(senderEd25519Pub || plaintext)` using Ed25519. Digital signatures are verified by the recipient before saving to disk.
+- **Why Ciphertext Hashing Failed:** Earlier alpha builds attempted to deduplicate on `SHA-256(ciphertext)`. Because each transmission generates fresh ephemeral keys and AES nonces, ciphertexts were completely different, causing duplicate messages to slip past the filter under continuous BLE scanning. Signing over canonical plaintext produces an invariant 64-byte signature that catches duplicates across re-encryptions and multi-hop carrier relays.
 
-## 7. Roadmap to Stronger Security
+### 2.3 Denial-of-Sleep & Radio Protection
+- **Relay Load Shedding:** When device battery drops below 20%, `PowerPolicyEngine` sets `relayWillingness = 0.0` in the Go router. The node stops accepting forwarded messages from other phones, acting strictly as an edge node to keep the device alive.
+- **20-Second Per-MAC Discovery Limiter:** In `PROTEST` mode, background discovery packets (`0x10`) are limited to 3 per minute per MAC address, preventing an adversary with a laptop from spamming notifications across a crowd.
 
-| Version | Addition | Threat Mitigated |
-|---|---|---|
-| **v0.2.0 ✓** | PowerPolicyEngine + relay willingness gate | Battery exhaustion / Denial-of-Sleep attacks |
-| **v0.2.0 ✓** | Reciprocal mutual QR verification + ciphertext dedup | Replay attacks & unilateral contact impersonation |
-| **v0.2.5** | Contact Introductions (signed vouching envelope) | Sybil / unknown peer injection |
-| **v0.3.0** | Protest Mode (1-tap consent discovery + 24h short codes) | Physical capture during high-friction setup |
-| **v0.3.5** | Fixed-size packet padding + cover traffic | Traffic analysis & packet length correlation |
-| **v0.4.0** | WiFi Direct multi-transport fallback | BLE 2.4GHz RF jamming (partial) |
-| **v1.0.0** | ML-KEM-1024 + ML-DSA-65 hybrid PQ crypto | Store-now-decrypt-later quantum adversary |
-| **v1.0.0** | Shamir (5,3) identity recovery + biometric seed | Key loss & device seizure |
+---
+
+## 3. What v0.3.5 Does NOT Protect (Known Limitations)
+
+### 3.1 Metadata Leakage Over BLE
+- **4-Byte Key Fingerprint:** To match peers without initiating a GATT connection, devices advertise a 4-byte hash: `SHA-256(ed25519Pub)[0..3]`. While Android rotates MAC addresses, this 4-byte fingerprint remains constant across advertisements until posture is changed. A stationary BLE sniffer can track when this fingerprint enters and leaves radio range.
+- **Packet Length Correlation:** Messages are not padded to fixed sizes (e.g. 512-byte blocks). An attacker inspecting packet sizes can correlate that a 120-byte write corresponds to a short acknowledgment, while an 800-byte write corresponds to a multi-member group envelope.
+
+### 3.2 Physical & OS Vulnerabilities
+- **Device Seizure:** All keys reside in application storage. If an activist is detained with their phone unlocked, the messaging database is directly readable.
+- **No Remote Wipe:** GHOST has no internet connection, so remote wipe is physically impossible. A manual "Panic Button" exists in settings, but it requires user action.
+
+---
+
+## 4. Group Chat Security Comparison
+
+| Metric | Bridgefy | BitChat | Briar | GHOST Cell Groups (v0.3.5) |
+|---|---|---|---|---|
+| **Group Mode Encryption** | ❌ **Cleartext Broadcast** (anyone in range reads it) | ⚠️ Channel password / open Nostr | ✅ E2E encrypted | ✅ **Pairwise E2E per member** |
+| **Relay Privacy** | ❌ Relays read plaintext | ❌ Relays read Nostr events | ⚠️ Relays store full forum | ✅ **Relays handle opaque envelopes** |
+| **Roster Exposure** | Exposed to all nearby radios | Exposed on public relays | Shared with all forum subscribers | **Hidden** (envelopes addressed individually) |
+| **Storage Amplification** | N/A | High (Nostr relays) | ❌ **Severe** (unbounded forum replication) | ✅ **Bounded** (max 8 members, 48h auto-pruning) |
+| **Battery Impact** | ❌ Uncontrolled (phone dies in ~3h) | ⚠️ Medium | ❌ Heavy (~15%/day) | ✅ **Throttled by PowerPolicyEngine** |
+
+---
+
+## 5. Security Postures & Defensive Use
+
+| Posture | BLE Radio State | Threat Mitigation | Recommended Scenario |
+|---|---|---|---|
+| `NORMAL` | Standard Duty Cycle (2000ms scan / 500ms adv) | Balanced power and privacy; requires in-person QR exchange | Daily walking around, routine communication |
+| `PROTEST` | High-Duty Cycle (1000ms scan / 200ms adv) | Rapid nearby contact discovery without physical camera alignment | Protests, fast-moving crowds, rallies |
+| `EMERGENCY` | Continuous Low-Latency (100% duty, 100ms adv) | Maximum packet delivery speed across high-density mesh | Blackouts, earthquakes, search & rescue |
+| `STEALTH` | **Zero Radio Transmission** (TX killed, RX only) | **Eliminates RF detection** by police direction-finding equipment | Evading kettling, hiding, checkpoint traversal |

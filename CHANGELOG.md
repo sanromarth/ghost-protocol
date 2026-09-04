@@ -4,6 +4,80 @@ All notable changes to the GHOST Protocol project are documented in this file.
 
 ---
 
+## [v0.3.5] — 2026-09-04
+
+Major feature release implementing **Cell Groups** — private, verified group chat for up to 8 members using pairwise end-to-end encryption.
+
+### Added
+- **Pairwise Unicast Envelopes (Opcode `0x30`):**
+  - Group messages are not broadcast in cleartext (unlike Bridgefy) and do not leak persistent public channel identifiers (unlike BitChat).
+  - Every group message generates separate pairwise envelopes for each verified member:
+    `[1B: 0x30][32B: groupId][16B: senderContactId][8B: timestamp][AES-256-GCM ciphertext][64B: Ed25519 signature]`
+  - Encrypted with fresh ephemeral X25519 keypairs per member. Relays cannot decrypt message contents, view sender identities, or inspect member rosters.
+  - Wire envelope size is ~281 bytes, fitting cleanly inside standard 512-byte BLE ATT MTU without requiring L2CAP fragmentation.
+  - Routes directly to member peer IDs (`SHA-256(memberEd25519PubKey)`), naturally triggering standard `OnDeliver` callbacks on recipient devices with zero changes required in Go or Rust engines.
+- **High-Entropy Group ID Generator:**
+  - Derives a 64-character hex ID: `SHA-256(creatorEd25519Pub || timestampBE || 16-byte random nonce)`.
+  - Nonce prevents ID collisions when multiple groups are created in the same millisecond.
+- **Room Database Migration v6 → v7 (`MIGRATION_6_7`):**
+  - Added `groups` table: `groupId`, `name`, `creatorContactId`, `memberContactIdsJson`, `createdAt`, `isActive`.
+  - Added `group_messages` table: `id` (autoincrement), `groupId`, `senderContactId`, `text`, `timestamp`, `status`, `replyToSender`, `replyToText`.
+  - Added indexes on `groupId`, `timestamp`, and `status`.
+  - Added 48-hour rolling pruning query (`pruneOlderThan`) executed inside the background telemetry loop.
+- **Cell Group Orchestrators:**
+  - `GroupMessageSender`: Handles pairwise fan-out, direct GATT writes for in-range peers, mesh router queueing for out-of-range peers, and peer re-encounter re-flushing while strictly preserving original message timestamps for chronological ordering.
+  - `GroupMessageReceiver`: Validates sender against `ContactDao`, verifies group membership in `GroupDao`, verifies Ed25519 signature (silent drop on mismatch), decrypts with local X25519 secret, and triggers batched notifications with unread counts.
+- **Cell Group Tactical UI:**
+  - `GroupCreationScreen`: Enforces hard 2–8 member cap; filters for verified contacts only (`isVerified = true`). Unverified contacts are disabled.
+  - `GroupChatScreen`: Monospace chat layout, sender attribution labels, small 26dp hexagon avatars beside incoming bubbles, quoted swipe-to-reply support, and animated violet shimmer borders for messages in `STATUS_SPRAYED`.
+  - `GroupInfoBottomSheet`: Displays group metadata, member roster with `CREATOR` and `YOU` badges, and leave/delete actions.
+  - `HexagonAvatar`: Deterministic hue gradient derived from group name with a violet border.
+  - `ContactListScreen`: Interleaved active Cell Groups marked with a purple `CELL` pill badge; added dedicated "CELL" Floating Action Button.
+  - `MainActivity`: Navigation routes `"group_creation"` and `"group_chat/{groupId}"`, with automatic deep-link routing when opened from notifications.
+
+---
+
+## [v0.3.0] — 2026-09-03
+
+Major release implementing **Protest Mode**: security posture management, one-tap nearby BLE discovery, and 24-hour rotating BIP-39 short codes.
+
+### Added
+- **Security Posture Engine (`SecurityPostureManager`):**
+  - State engine providing 4 discrete operating postures:
+    - `NORMAL`: Default mode. Discovery requires in-person QR scanning. Standard power policy.
+    - `PROTEST`: High-readiness mode. 1000ms scan / 200ms window. Background one-tap BLE discovery enabled.
+    - `EMERGENCY`: Maximum mesh throughput. 100% duty cycle (continuous scanning), 100ms advertising. Immediate forwarding.
+    - `STEALTH`: Radio silence. BLE advertising completely stopped. Passive receiver mode only (listen without transmitting RF).
+  - Low-battery failsafe: Automatically reverts from `EMERGENCY` or `PROTEST` back to `NORMAL` when battery drops below 15%.
+- **Nearby BLE Discovery & One-Tap Handshake (Opcodes `0x10` & `0x11`):**
+  - Wire protocol for frictionless in-range contact discovery:
+    - Request (`0x10`): `[1B 0x10][32B ed25519Pub][32B x25519Pub][8B timestamp][name (max 32B)][64B signature]`
+    - Response (`0x11`): `[1B 0x11][32B ed25519Pub][32B x25519Pub][8B timestamp][name (max 32B)][64B signature]`
+  - Demuxed at byte 0 in `BleManager` without touching the Go routing layer.
+  - 20-second per-MAC rate limiter (maximum 3 requests/minute per device) preventing notification flood attacks in dense crowds.
+  - Generates high-priority Android notification with "Add Contact" action button.
+- **24-Hour Rotating BIP-39 Short Verification Codes (Opcodes `0x20`–`0x23`):**
+  - Derives a 3-word + 4-digit code (e.g. `LION - COBALT - HARBOR - 4821`) using HMAC-SHA256 over `(Ed25519 Seed || UTC Epoch Day)`.
+  - 11-bit index extraction over standard BIP-39 2048-word list (`seed[0..1] and 0x7FF`) + 4-digit numeric suffix (`seed[6..7] % 10000`). Total entropy ~8.6 × 10¹³ combinations.
+  - Rotates deterministically at midnight UTC. The private seed never leaves the device.
+  - Wire opcodes:
+    - `0x20`: Direct BLE query (`[1B 0x20][32B targetCodeHash][32B senderEd25519Pub][64B sig]`).
+    - `0x21`: Direct BLE response (`[1B 0x21][32B responderEd25519Pub][32B responderX25519Pub][64B sig]`).
+    - `0x22`: Mesh-routed multi-hop query across Go router.
+    - `0x23`: Mesh-routed multi-hop response.
+  - Anti-probing defense: Queries with mismatched code hashes are dropped silently with zero response packet emitted over the air.
+- **UI Screens:**
+  - `ShortCodeScreen`: Displays user's active 3-word code, 4-digit suffix, QR code, and countdown timer to next UTC midnight rotation.
+  - `ShortCodeInputScreen`: Word auto-complete chip input against BIP-39 dictionary with direct and mesh query dispatch.
+
+### Fixed
+- **Duplicate "4x Message" Scan Burst Bug:**
+  - *Root Cause 1 (Sender):* In `PROTEST` and `EMERGENCY` modes, BLE scan callbacks fire every 100–200ms. In `GhostService.kt`, the check `if (!hasPendingRoom && (now - lastCall < 10_000)) continue` skipped throttling whenever a message was in `STATUS_PENDING`, triggering overlapping concurrent delivery loops.
+  - *Root Cause 2 (Receiver):* Deduplication checked `SHA-256(ciphertext)`. Because each send encrypted plaintext with a fresh ephemeral X25519 key and random AES nonce, ciphertexts were completely different, causing the hash dedup check to miss all duplicate packets.
+  - *Fix:* Switched deduplication to hash the 64-byte Ed25519 digital signature over `(senderPubKey + plaintext)` (RFC 8032). Because Ed25519 signatures are deterministic, all re-encryptions and relays share the identical signature. Added 60s signature cache (`recentMessageSignatures`) and 6s content cache (`recentMessageContents`). Added unconditional 5-second encounter throttle and `deliveringContacts` in-flight concurrency lock.
+
+---
+
 ## [v0.2.0] — 2026-09-03
 
 Major release focusing on physical battery efficiency, delay-tolerant mesh delivery, and reciprocal contact verification. Verified across two physical Android devices over BLE.

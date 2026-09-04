@@ -1,13 +1,15 @@
 # GHOST Protocol Go Package API Reference
 
-> **Version:** v0.2.0 — reflects actual implemented code in `go/ghostrouter/`.
+> **Version:** v0.3.5 — reflects actual implemented code in `go/ghostrouter/`.
 > The `ghost-economy` and `ghost-mesh` packages described in RFCs do not exist yet.
+>
+> **v0.3.5 Payload Invariance:** The Go router core is transport-agnostic and treats payload bytes as opaque. In v0.3.0 (Protest Mode Short Codes `0x22`/`0x23`) and v0.3.5 (Cell Groups `0x30`), messages are routed transparently via standard unicast envelopes without modifying the Go router state machine.
 
 ## ghostrouter (Implemented)
 
 ### Package: `go/ghostrouter/`
 
-Spray-and-Wait opportunistic routing with BoltDB persistence, compiled via gomobile into `ghostrouter.aar`.
+Spray-and-Wait opportunistic routing with BoltDB persistence, compiled via gomobile into `ghostrouter.aar`. Handles direct single-hop transfers and multi-hop opportunistic store-and-forward mesh routing across BLE encounters.
 
 ### Exported Types
 

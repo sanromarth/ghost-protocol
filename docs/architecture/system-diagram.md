@@ -1,167 +1,297 @@
 # GHOST Protocol System Architecture
 
-> **Version:** v0.2.0 — includes PowerPolicyEngine, BatteryTelemetry, and GATT message batching.
-> For the full 7-layer vision, see `docs/rfc/rfc-001-physics.md` through `rfc-007-application.md`.
+> **Version:** v0.3.5 — includes Security Posture Engine, Nearby Discovery (0x10/0x11), 24h Rotating BIP-39 Codes (0x20–0x23), Cell Groups (0x30), and Room Schema v7.  
+> **Target Platform:** Android 8.0+ (API 26+), pure AOSP, zero Google Play Services.
 
-## 1. Overview
+---
 
-GHOST Protocol v0.2.0 is an offline mesh messenger for Android. Two phones discover each other over BLE 5.0, exchange Ed25519/X25519 keys via QR code, and send end-to-end encrypted text messages routed through a Go Spray-and-Wait router. Messages can hop through intermediate phones when sender and receiver are not in direct BLE range. 
+## 1. System Overview
 
-v0.2.0 introduces a centralized **PowerPolicyEngine** (4 dynamic modes: ACTIVE, ECO, CRITICAL, DEEP_SLEEP), **Message Batching** over single GATT sessions with sequential write-chaining, **Relay Willingness Gating** to shed relay burdens on dying batteries, and **BatteryTelemetry** with SQLite snapshot logging and CSV export.
+GHOST is an offline mesh communications system for Android devices. Devices communicate over Bluetooth Low Energy (BLE) 5.0. Cryptography is handled by a native Rust crate (`ghost-crypto`) over JNI. Multi-hop delay-tolerant mesh routing is handled by a native Go engine (`ghostrouter`) running BoltDB over gomobile.
 
-**Languages:** Kotlin (UI + BLE + Power + glue layer), Rust (crypto via JNI), Go (routing + batch serializer via gomobile)
-
-## 2. Implemented Architecture
+Higher-level application orchestration — security postures, one-tap discovery, ephemeral code rotation, group messaging, and battery-aware duty cycles — is handled in Kotlin.
 
 ```mermaid
 graph TD
-    subgraph "Android App (Kotlin)"
-        UI[Jetpack Compose UI<br>ChatScreen, ContactList, Settings, QR]
-        Service[GhostService<br>Foreground, WakeLock, 30s Policy Loop]
+    subgraph "Android App Layer (Kotlin)"
+        UI[Jetpack Compose UI<br>ChatScreen, GroupChatScreen, ContactList, HUD]
+        Service[GhostService<br>Foreground Service, WakeLock, 30s Policy Loop]
+        Posture[SecurityPostureManager<br>NORMAL / PROTEST / EMERGENCY / STEALTH]
         Power[PowerPolicyEngine<br>ACTIVE / ECO / CRITICAL / DEEP_SLEEP]
-        Telem[BatteryTelemetry<br>Room DB v4, 7-day retention, CSV export]
-        BLE[BleManager<br>BLE 5.0 adv/scan policy, GATT batching]
-        Room[Room Database<br>Contacts, Messages, Telemetry]
+        Discovery[DiscoveryManager<br>Opcode 0x10/0x11 Nearby Consent Handshake]
+        ShortCode[ShortCodeManager<br>Opcode 0x20-0x23 24h Rotating BIP-39 Codes]
+        GroupSend[GroupMessageSender<br>Pairwise Unicast Envelopes 0x30]
+        GroupRecv[GroupMessageReceiver<br>Opcode 0x30 Demux, Ed25519 Verify, Dedup]
+        BLE[BleManager<br>GATT Client/Server, MTU 512, Batch Writes]
+        Room[Room DB v7<br>contacts, messages, groups, group_messages, telemetry]
     end
 
-    subgraph "Rust (JNI)"
-        Crypto[ghost-crypto<br>Ed25519, X25519, AES-256-GCM]
+    subgraph "Rust Engine (JNI)"
+        Crypto[ghost-crypto<br>Ed25519, X25519 ECDH, AES-256-GCM]
     end
 
-    subgraph "Go (gomobile)"
-        Router[GhostRouter<br>Spray-and-Wait, BoltDB, Relay Gate]
+    subgraph "Go Engine (gomobile)"
+        Router[GhostRouter<br>Spray-and-Wait L=4, BoltDB, Relay Gate]
         Batch[Batch Serializer<br>EncodeBatch / DecodeBatch]
     end
 
     UI <--> Service
+    Service --> Posture
     Service --> Power
-    Service --> Telem
-    Telem --> Room
+    Service --> Discovery
+    Service --> ShortCode
+    Service --> GroupSend
+    Service --> GroupRecv
     Service <--> BLE
     Service <--> Room
-    UI --> Crypto
-    Service --> Crypto
+    GroupSend --> Crypto
+    GroupRecv --> Crypto
+    GroupSend <--> Router
     Service <--> Router
     Router --> Batch
     Service -.->|"setRelayWillingness(w)"| Router
-    BLE -.->|"GATT Batch (MTU 512, chained writes)"| BLE
+    BLE -.->|"GATT Chained Writes"| BLE
 ```
 
-## 3. FFI Boundaries
+---
+
+## 2. FFI & Process Boundaries
+
+Kotlin serves as the system coordinator. Rust and Go share zero address space and do not talk directly; all data passes through Kotlin as raw byte arrays:
 
 ```mermaid
 graph LR
-    Kotlin[Kotlin<br>Android App + Service + BLE]
-    Rust[Rust<br>ghost-crypto crate<br>Ed25519, X25519, AES-256-GCM]
-    Go[Go<br>ghostrouter package<br>Spray-and-Wait, BoltDB]
+    Kotlin[Kotlin Host Layer<br>GhostService + BleManager]
+    Rust[Rust Crate<br>ghost-crypto<br>Ed25519, X25519, AES-256-GCM]
+    Go[Go Engine<br>ghostrouter<br>Spray-and-Wait, BoltDB]
 
     Kotlin -- "JNI (libghost_crypto.so)" --> Rust
     Kotlin -- "gomobile (ghostrouter.aar)" --> Go
-    Rust -. "No direct connection" .- Go
+    Rust -. "No Direct Connection" .- Go
 ```
 
-## 4. Message Send Flow (v0.1.5)
+### JNI Invariant
+JNI buffers must be treated as transient. Data pointers passed into Go from Kotlin via gomobile can be freed immediately after the call returns. The Go router copies incoming byte slices via `make([]byte, len(src))` before persisting into BoltDB.
+
+---
+
+## 3. Wire Protocol Demuxing (Byte 0)
+
+Incoming GATT write requests land in `BleManager.onCharacteristicWriteRequest`. Packets are demuxed by inspecting `data[0]`:
+
+```
+Byte 0 Value   Handler                    Routing Path
+-----------------------------------------------------------------
+0x10           DiscoveryManager           Kotlin-to-Kotlin direct
+0x11           DiscoveryManager           Kotlin-to-Kotlin direct
+0x20           ShortCodeManager           Kotlin-to-Kotlin direct
+0x21           ShortCodeManager           Kotlin-to-Kotlin direct
+0x22           GhostRouter (multi-hop)    Go Spray-and-Wait mesh
+0x23           GhostRouter (multi-hop)    Go Spray-and-Wait mesh
+0x30           GroupMessageReceiver       Kotlin unicast envelope
+All other      GhostRouter (0x01)         Go Spray-and-Wait mesh
+```
+
+---
+
+## 4. Message Flow Diagrams
+
+### 4.1 1:1 Direct / Multi-Hop Message Send Flow
 
 ```mermaid
 sequenceDiagram
     participant User
     participant UI as ChatScreen (Kotlin)
-    participant Crypto as ghost-crypto (Rust JNI)
+    participant Crypto as ghost-crypto (Rust)
     participant Router as GhostRouter (Go)
     participant BLE as BleManager (Kotlin)
 
-    User->>UI: Type message, tap Send
-    UI->>Crypto: encrypt(x25519_pub, payload)
-    Note over Crypto: payload = ed25519_pub(32) + "username\0message" + ed25519_sig(64)
+    User->>UI: Types text, taps Send
+    UI->>Crypto: encrypt(recipientX25519Pub, payload)
+    Note over Crypto: payload = ed25519Pub(32) + "name\0msg" + ed25519Sig(64)
     Crypto-->>UI: ciphertext
-    UI->>Router: sendMessage(dstId, ciphertext)
-    alt Destination seen <60s ago
-        Router-->>UI: (isDirect=true, routedBlob)
-        UI->>BLE: sendMessage(bleAddress, blob)
-        BLE-->>UI: success/failure
-        Note over UI: ✓ SENT or ⚠ FAILED
-    else Destination not reachable
+    UI->>Router: sendMessage(dstPeerId, ciphertext)
+    alt Recipient in direct range (<60s)
+        Router-->>UI: (isDirect=true, blob)
+        UI->>BLE: sendMessage(macAddress, blob)
+        BLE-->>UI: Success / Queued
+    else Recipient out of range
         Router-->>UI: (isDirect=false, null)
-        Note over Router: Store in BoltDB (copies=4)
-        Note over UI: 📡 SPRAYED
+        Note over Router: Stored in BoltDB (copies=4)
+        Note over UI: Marked STATUS_SPRAYED
     end
 ```
 
-## 5. Message Receive Flow
-
-```mermaid
-sequenceDiagram
-    participant BLE as BleManager (Kotlin)
-    participant Service as GhostService (Kotlin)
-    participant Router as GhostRouter (Go)
-    participant Crypto as ghost-crypto (Rust JNI)
-    participant DB as Room Database
-
-    BLE->>Service: incomingMessages.collect(data)
-    Service->>Router: onMessageReceived(data)
-    alt Message for us (dst matches localId)
-        Router-->>Service: "delivered" (via DeliverHandler.onDeliver(senderId))
-        Service->>Crypto: decrypt(x25519_secret, ciphertext)
-        Crypto-->>Service: plaintext = ed25519_pub + "name\0text" + signature
-        Service->>Crypto: verify(ed25519_pub, data, signature)
-        Service->>DB: messageDao.insert(message)
-        Note over Service: Update contact name if changed
-    else Message for someone else
-        Router-->>Service: "forwarded"
-        Note over Router: Store in BoltDB for relay spraying
-    else Routing header decode fails
-        Router-->>Service: "error: ..."
-        Service->>Crypto: directDecryptAndSave(data) [fallback]
-    end
-```
-
-## 6. Component Summary
-
-| Component | Language | Size | Purpose |
-|---|---|---|---|
-| `android/app/` | Kotlin | ~5,600 LOC | UI (Compose), BLE (GATT + batching), PowerPolicyEngine, BatteryTelemetry, Room DB (v6), Mutual QR |
-| `rust/ghost-crypto/` | Rust | ~300 LOC | Ed25519 sign/verify, X25519 DH, AES-256-GCM encrypt/decrypt |
-| `go/ghostrouter/` | Go | ~950 LOC | Spray-and-Wait routing, batch serializer, relay willingness gating, BoltDB store |
-
-## 7. Key Data Structures
-
-| Structure | Format | Notes |
-|---|---|---|
-| Identity blob | `ed25519_seed(32) + ed25519_pub(32) + x25519_secret(32) + x25519_pub(32)` = 128 bytes | Generated once at first launch |
-| QR payload | `GHOST:<Base64(ed25519_pub + x25519_pub + name_utf8)>` | In-person zero-TOFU exchange |
-| Contact ID | `SHA-256(ed25519_pub).take(8).toHex()` → 16-char hex string | Stable unique identifier |
-| BLE fingerprint | `SHA-256(ed25519_pub).take(4)` → 4 bytes in primary `advData` | Enables passive scanning & survives MAC rotation |
-| Router peer ID | `SHA-256(ed25519_pub)` → 32 raw bytes | Used by Go router in BoltDB |
-| Message ID | `computeMessageID(payload + random_nonce)` | Prevents collisions & replay |
-| Encrypted payload | `[ed25519_pub(32)] [name\0body OR name\0REPLY\0qSender\0qText\0body] [ed25519_sig(64)]` | Encrypted with X25519 + AES-256-GCM |
-| Single wire format | `[4B headerLen][JSON RoutingHeader][encrypted payload]` | Backward-compatible direct & routed envelope |
-| Batch wire format | `[1B count][4B len1][msg1][4B len2][msg2]...` | Single GATT connection sequential writes |
-| Telemetry record | `TelemetryEntity` in Room (`telemetry_snapshots`): 15 metrics | 48-hour rolling retention with CSV export |
-
-## 8. Reciprocal QR Verification Flow
+### 4.2 One-Tap Nearby Discovery Handshake (Opcodes 0x10 / 0x11)
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant A as Device A (Scanner)
-    participant B as Device B (Showing QR)
-    
-    A->>B: Scans Device B's cryptographic QR code
-    A->>A: Haptic buzz + Saves B as Contact (isVerified=true)
-    A->>A: Room DB: Inserts "* verified B *"
-    A->>A: Automatically opens QRShowScreen (displays A's QR)
-    A->>B: Transmits signed verification packet over BLE
-    B->>A: Scans Device A's QR code (now on screen)
-    B->>B: Room DB: Inserts "* verified A *" & "* mutual verification with A *"
-    B->>B: High-priority notification: "Mutual verification: You and A verified each other"
-    B->>A: Transmits mutual verification ACK over BLE
-    A->>A: Room DB: Inserts "* mutual verification with B *"
-    A->>A: High-priority notification: "Mutual verification: You and B verified each other"
-    Note over A,B: Both devices trigger heartbeat haptics and activate the signature Ghost Aura (animated Ethereal Ring)
+    participant A as Device A (Protest Mode)
+    participant B as Device B (Protest Mode)
+
+    Note over A,B: Device A detects B's 4-byte fingerprint in BLE advertisement
+    A->>A: Checks 20s per-MAC rate limit
+    A->>A: Displays notification: "GHOST User Nearby. Tap to Connect."
+    A->>B: Writes Opcode 0x10 [0x10 || edPub_A || xPub_A || ts || name || sig_A]
+    B->>B: Verifies sig_A with edPub_A
+    B->>B: Displays notification: "Incoming contact request from A"
+    B->>B: User taps "Accept"
+    B->>A: Writes Opcode 0x11 [0x11 || edPub_B || xPub_B || ts || name || sig_B]
+    A->>A: Verifies sig_B with edPub_B
+    A->>A: Saves B to Room DB (isVerified = true)
+    B->>B: Saves A to Room DB (isVerified = true)
+    Note over A,B: Mutual contact link established in < 3 seconds
 ```
 
-## 9. Deployment Model
-- Single debug APK (~46 MB, includes arm64-v8a + x86_64 native libraries)
-- **Zero Google Play Services** dependencies (pure AOSP compatible)
-- Sideloadable via USB, local ad-hoc transfer, or microSD
-- Target: Android 8.0+ (API 26), 1GB RAM minimum, zero internet connectivity required
+### 4.3 24-Hour Rotating BIP-39 Short Code Resolution (Opcodes 0x20 / 0x21)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Device A (Searcher)
+    participant B as Device B (Target: "LION-COBALT-HARBOR-4821")
+
+    A->>A: Computes targetCodeHash = SHA-256("LION-COBALT-HARBOR-4821")
+    A->>B: Writes Opcode 0x20 [0x20 || targetCodeHash || edPub_A || sig_A]
+    B->>B: Compares targetCodeHash to local active short code
+    alt Code does not match
+        Note over B: Silent drop. Zero radio emission (anti-probing defense)
+    else Code matches
+        B->>A: Writes Opcode 0x21 [0x21 || edPub_B || xPub_B || sig_B]
+        A->>A: Verifies sig_B with edPub_B
+        A->>A: Saves B as contact (isVerified = true)
+        A->>A: Posts notification: "Short code match found!"
+    end
+```
+
+### 4.4 Cell Group Fan-Out & Delivery (Opcode 0x30)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as Sender (Group Creator)
+    participant M1 as Member 1 (Direct Range)
+    participant M2 as Member 2 (Relayed via Mesh)
+    participant R as Intermediate Relay Node
+
+    Note over S: User sends to Group "Squad Alpha" (3 members)
+    S->>S: Encrypts wireText for Member 1 using X25519_M1
+    S->>S: Encrypts wireText for Member 2 using X25519_M2
+    
+    Note over S,M1: Member 1 is in direct BLE range
+    S->>M1: Direct GATT write: Opcode 0x30 Envelope 1 (~281 bytes)
+    M1->>M1: Demux 0x30 -> Verifies sig -> Decrypts with X25519_secret_M1 -> Saves to group_messages
+    
+    Note over S,R: Member 2 is out of range
+    S->>R: Go Router sprays Opcode 0x30 Envelope 2 to Carrier (L=2)
+    Note over R: Carrier node cannot decrypt envelope (forwarded only)
+    R->>M2: Carrier encounters Member 2 -> Delivers Envelope 2
+    M2->>M2: Demux 0x30 -> Verifies sig -> Decrypts with X25519_secret_M2 -> Saves to group_messages
+```
+
+---
+
+## 5. Security Posture State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> NORMAL
+    NORMAL --> PROTEST: User selects Protest Mode
+    PROTEST --> NORMAL: User disables or battery < 15%
+    PROTEST --> EMERGENCY: User triggers Emergency
+    EMERGENCY --> NORMAL: Battery < 15% or manual revert
+    NORMAL --> STEALTH: User activates Radio Silence
+    PROTEST --> STEALTH: User activates Radio Silence
+    STEALTH --> NORMAL: User resumes standard operation
+
+    state NORMAL {
+        [*] --> NormalDuty
+        NormalDuty: Scan 2000ms / Adv 500ms
+        NormalDuty: Discovery disabled
+    }
+
+    state PROTEST {
+        [*] --> ProtestDuty
+        ProtestDuty: Scan 1000ms / Adv 200ms
+        ProtestDuty: Background Discovery 0x10 enabled
+    }
+
+    state EMERGENCY {
+        [*] --> ContinuousDuty
+        ContinuousDuty: Scan 100ms continuous (100% duty)
+        ContinuousDuty: 100ms advertising
+    }
+
+    state STEALTH {
+        [*] --> PassiveOnly
+        PassiveOnly: Advertising transmitter killed (0 mW)
+        PassiveOnly: Passive scanner only (listen-only)
+    }
+```
+
+---
+
+## 6. Persistence Schema (Room Database v7)
+
+```
++---------------------------------------------------------------------------------+
+|                                 GHOST DATABASE (v7)                             |
++---------------------------------------------------------------------------------+
+
+contacts
+├── id: TEXT PRIMARY KEY (16-char hex)
+├── name: TEXT
+├── ed25519PubKey: TEXT (Base64)
+├── x25519PubKey: TEXT (Base64)
+├── bleAddress: TEXT (nullable)
+├── isVerified: INTEGER (0 or 1)
+└── createdAt: INTEGER
+
+messages
+├── id: TEXT PRIMARY KEY (UUID)
+├── contactId: TEXT (FK)
+├── content: TEXT
+├── isOutgoing: INTEGER
+├── timestamp: INTEGER
+├── isVerified: INTEGER
+├── status: INTEGER (0=PEND, 1=SENT, 2=DELIV, 3=FAIL, 4=SPRAY)
+├── replyToSender: TEXT (nullable)
+└── replyToText: TEXT (nullable)
+
+groups
+├── groupId: TEXT PRIMARY KEY (64-char hex)
+├── name: TEXT
+├── creatorContactId: TEXT (16-char hex)
+├── memberContactIdsJson: TEXT (JSON array string)
+├── createdAt: INTEGER
+└── isActive: INTEGER (0 or 1)
+
+group_messages
+├── id: INTEGER PRIMARY KEY AUTOINCREMENT
+├── groupId: TEXT
+├── senderContactId: TEXT
+├── text: TEXT
+├── timestamp: INTEGER
+├── status: INTEGER (0=PEND, 1=SENT, 2=DELIV, 3=FAIL, 4=SPRAY)
+├── replyToSender: TEXT (nullable)
+└── replyToText: TEXT (nullable)
+
+telemetry_snapshots
+├── id: INTEGER PRIMARY KEY AUTOINCREMENT
+├── timestamp: INTEGER
+├── batteryPercent: INTEGER
+├── batteryTemperature: REAL
+├── isCharging: INTEGER
+├── bleScanTimeMs: INTEGER
+├── bleAdvertiseTimeMs: INTEGER
+├── gattConnections: INTEGER
+├── gattBytesTx: INTEGER
+├── gattBytesRx: INTEGER
+├── cpuWakeups: INTEGER
+├── messagesForwarded: INTEGER
+├── messagesDelivered: INTEGER
+├── avgDeliveryLatencyMs: INTEGER
+├── currentMode: TEXT
+└── peerCount: INTEGER
+```

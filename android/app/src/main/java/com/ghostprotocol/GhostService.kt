@@ -177,7 +177,8 @@ class GhostService : Service() {
             groupDao = db.groupDao(),
             contactDao = db.contactDao(),
             groupMessageDao = db.groupMessageDao(),
-            scope = serviceScope
+            scope = serviceScope,
+            sharedSignatureCache = recentMessageSignatures
         )
         activeGroupSender = groupMessageSender
 
@@ -376,6 +377,8 @@ class GhostService : Service() {
                     batteryTelemetry.recordSnapshot(snapshot)
 
                     // v0.3.5: 48-hour rolling pruning for group messages
+                    // Group roster and metadata in 'groups' table are preserved indefinitely;
+                    // only transient message rows are pruned to protect flash storage.
                     val cutoff = System.currentTimeMillis() - 48 * 60 * 60 * 1000L
                     GhostDatabase.getInstance(applicationContext).groupMessageDao().pruneOlderThan(cutoff)
                 } catch (e: Exception) {
