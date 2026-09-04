@@ -38,6 +38,9 @@ import java.util.UUID
 import com.ghostprotocol.discovery.DiscoveryManager
 import com.ghostprotocol.discovery.ShortCodeProtocol
 import com.ghostprotocol.router.GhostRouter
+import com.ghostprotocol.group.GroupMessageReceiver
+import com.ghostprotocol.group.GroupMessageSender
+import com.ghostprotocol.group.GroupProtocol
 import com.ghostprotocol.security.SecurityPosture
 import com.ghostprotocol.security.SecurityPostureManager
 import com.ghostprotocol.security.ShortCodeManager
@@ -52,6 +55,9 @@ class GhostService : Service() {
 
         // In-memory cache for verification packets received before contact QR is scanned
         val pendingVerifications = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+        @Volatile
+        var activeGroupSender: GroupMessageSender? = null
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -65,6 +71,8 @@ class GhostService : Service() {
     private lateinit var discoveryManager: DiscoveryManager
     private lateinit var shortCodeManager: ShortCodeManager
     private lateinit var batteryTelemetry: BatteryTelemetry
+    private lateinit var groupMessageSender: GroupMessageSender
+    private lateinit var groupMessageReceiver: GroupMessageReceiver
     private var lastEncounterTimeMs: Long = System.currentTimeMillis()
     private var cpuWakeupCount: Int = 0
     private var messagesForwardedCount: Int = 0
@@ -156,6 +164,22 @@ class GhostService : Service() {
         discoveryManager.meshSender = { dstPeerId, payload ->
             ghostRouter?.sendMessage(dstPeerId, payload)
         }
+
+        // v0.3.5: Initialize Cell Group messaging
+        groupMessageSender = GroupMessageSender(
+            groupDao = db.groupDao(),
+            contactDao = db.contactDao(),
+            groupMessageDao = db.groupMessageDao(),
+            routerProvider = { ghostRouter }
+        )
+        groupMessageReceiver = GroupMessageReceiver(
+            context = applicationContext,
+            groupDao = db.groupDao(),
+            contactDao = db.contactDao(),
+            groupMessageDao = db.groupMessageDao(),
+            scope = serviceScope
+        )
+        activeGroupSender = groupMessageSender
 
         // React to posture changes immediately across the service lifecycle
         serviceScope.launch {
@@ -350,8 +374,12 @@ class GhostService : Service() {
                         peerCount = BleManager.peers.value.size
                     )
                     batteryTelemetry.recordSnapshot(snapshot)
+
+                    // v0.3.5: 48-hour rolling pruning for group messages
+                    val cutoff = System.currentTimeMillis() - 48 * 60 * 60 * 1000L
+                    GhostDatabase.getInstance(applicationContext).groupMessageDao().pruneOlderThan(cutoff)
                 } catch (e: Exception) {
-                    Log.e(TAG, ">>> Telemetry error: ${e.message}")
+                    Log.e(TAG, ">>> Telemetry / pruning error: ${e.message}")
                 }
             }
         }
@@ -413,7 +441,11 @@ class GhostService : Service() {
      */
     private fun processRoutedPayload(ciphertext: ByteArray) {
         if (ciphertext.isNotEmpty()) {
-            if (ciphertext[0] == ShortCodeProtocol.OPCODE_MESH_QUERY) {
+            if (ciphertext[0] == GroupProtocol.OPCODE_GROUP_ENVELOPE) {
+                Log.d(TAG, "GHOST_GROUP: Received routed group message envelope (0x30)")
+                groupMessageReceiver.onGroupMessageReceived(ciphertext)
+                return
+            } else if (ciphertext[0] == ShortCodeProtocol.OPCODE_MESH_QUERY) {
                 Log.d(TAG, "GHOST_SHORTCODE: Received mesh-routed short code query (0x22)")
                 discoveryManager.onMeshShortCodeQueryReceived(ciphertext)
                 return
@@ -699,6 +731,16 @@ class GhostService : Service() {
                         }
                     }
                 }
+
+                // v0.3.5: Re-flush pending group messages on peer encounters
+                try {
+                    val activeGroups = db.groupDao().getAllActiveOnce()
+                    for (g in activeGroups) {
+                        groupMessageSender.reflushPendingGroupMessages(g.groupId)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "GHOST_GROUP: Error reflushing group messages: ${e.message}")
+                }
             }
         }
     }
@@ -762,7 +804,11 @@ class GhostService : Service() {
         messageDao: com.ghostprotocol.data.MessageDao
     ) {
         if (data.isNotEmpty()) {
-            if (data[0] == ShortCodeProtocol.OPCODE_MESH_QUERY) {
+            if (data[0] == GroupProtocol.OPCODE_GROUP_ENVELOPE) {
+                Log.d(TAG, "GHOST_GROUP: Direct received group message envelope (0x30)")
+                groupMessageReceiver.onGroupMessageReceived(data)
+                return
+            } else if (data[0] == ShortCodeProtocol.OPCODE_MESH_QUERY) {
                 Log.d(TAG, "GHOST_SHORTCODE: Direct received mesh-routed short code query (0x22)")
                 discoveryManager.onMeshShortCodeQueryReceived(data)
                 return
@@ -1144,6 +1190,7 @@ class GhostService : Service() {
                 Log.d(TAG, ">>> WakeLock released")
             }
         }
+        activeGroupSender = null
         super.onDestroy()
     }
 

@@ -288,4 +288,70 @@ object NotificationHelper {
             Log.e(TAG, "GHOST_SHORTCODE: Error showing short code match notification: ${e.message}", e)
         }
     }
+
+    const val CHANNEL_GROUP_MESSAGES = "ghost_group_messages_channel"
+
+    private fun ensureGroupChannel(manager: NotificationManager) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (manager.getNotificationChannel(CHANNEL_GROUP_MESSAGES) == null) {
+                val channel = NotificationChannel(
+                    CHANNEL_GROUP_MESSAGES,
+                    "Cell Group Messages",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Notifications for incoming group messages"
+                    enableVibration(true)
+                }
+                manager.createNotificationChannel(channel)
+            }
+        }
+    }
+
+    fun showGroupMessageNotification(
+        context: Context,
+        groupName: String,
+        senderName: String,
+        preview: String,
+        groupId: String,
+        unreadCount: Int = 1
+    ) {
+        try {
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            ensureGroupChannel(manager)
+
+            val openIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("OPEN_GROUP_ID", groupId)
+            }
+            val openPendingIntent = PendingIntent.getActivity(
+                context,
+                ((groupId.hashCode() * 31 + 7) and 0x7FFFFFFF),
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val title = if (unreadCount > 1) {
+                "$groupName ($unreadCount new messages)"
+            } else {
+                groupName
+            }
+
+            val notificationId = 6000 + (groupId.hashCode() and 0xFFFF)
+            val notification = NotificationCompat.Builder(context, CHANNEL_GROUP_MESSAGES)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(title)
+                .setContentText("$senderName: $preview")
+                .setColor(0xFF9D4EDD.toInt())
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
+                .setAutoCancel(true)
+                .setContentIntent(openPendingIntent)
+                .build()
+
+            manager.notify(notificationId, notification)
+            Log.d(TAG, "GHOST_GROUP: Group notification posted for group $groupName (id=$notificationId)")
+        } catch (e: Exception) {
+            Log.e(TAG, "GHOST_GROUP: Error showing group notification: ${e.message}", e)
+        }
+    }
 }

@@ -119,11 +119,37 @@ class MainActivity : ComponentActivity() {
                                 val contactId = backStackEntry.arguments?.getString("contactId") ?: return@composable
                                 ChatScreen(contactId = contactId, navController = navController)
                             }
+                            composable("group_creation") {
+                                com.ghostprotocol.ui.GroupCreationScreen(
+                                    onBack = { navController.popBackStack() },
+                                    onGroupCreated = { groupId ->
+                                        navController.navigate("group_chat/$groupId") {
+                                            popUpTo("group_creation") { inclusive = true }
+                                        }
+                                    }
+                                )
+                            }
+                            composable("group_chat/{groupId}") { backStackEntry ->
+                                val groupId = backStackEntry.arguments?.getString("groupId") ?: return@composable
+                                com.ghostprotocol.ui.GroupChatScreen(
+                                    groupId = groupId,
+                                    onBack = { navController.popBackStack() }
+                                )
+                            }
                             composable("qr_show") { QRShowScreen(navController) }
                             composable("qr_scan") { QRScanScreen(navController) }
                             composable("settings") { SettingsScreen(navController) }
                             composable("short_code") { ShortCodeScreen(navController) }
                             composable("short_code_input") { ShortCodeInputScreen(navController) }
+                        }
+
+                        // Auto-navigate to group if opened from a group notification
+                        androidx.compose.runtime.LaunchedEffect(intent) {
+                            val openGroupId = intent.getStringExtra("OPEN_GROUP_ID")
+                            if (!openGroupId.isNullOrEmpty()) {
+                                navController.navigate("group_chat/$openGroupId")
+                                intent.removeExtra("OPEN_GROUP_ID")
+                            }
                         }
                     }
                 }

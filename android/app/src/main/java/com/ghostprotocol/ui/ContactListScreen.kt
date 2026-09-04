@@ -34,6 +34,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
 import com.ghostprotocol.data.Contact
 import com.ghostprotocol.data.GhostDatabase
+import com.ghostprotocol.data.GroupEntity
 import com.ghostprotocol.data.MessageEntity
 import com.ghostprotocol.ble.BleManager
 import kotlinx.coroutines.flow.StateFlow
@@ -53,8 +54,12 @@ class ContactListViewModel(application: Application) : AndroidViewModel(applicat
     private val db = GhostDatabase.getInstance(application)
     private val contactDao = db.contactDao()
     private val messageDao = db.messageDao()
+    private val groupDao = db.groupDao()
 
     val contacts: StateFlow<List<Contact>> = contactDao.getAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val activeGroups: StateFlow<List<GroupEntity>> = groupDao.getAllActive()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 }
 
@@ -62,6 +67,7 @@ class ContactListViewModel(application: Application) : AndroidViewModel(applicat
 @Composable
 fun ContactListScreen(navController: NavController, viewModel: ContactListViewModel = viewModel()) {
     val contacts by viewModel.contacts.collectAsStateWithLifecycle(initialValue = emptyList())
+    val activeGroups by viewModel.activeGroups.collectAsStateWithLifecycle(initialValue = emptyList())
     val blePeers by BleManager.peers.collectAsStateWithLifecycle(initialValue = emptyList())
     var searchQuery by remember { mutableStateOf("") }
     var currentTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -153,7 +159,7 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                             .clip(RoundedCornerShape(T.RadiusInput)),
                         placeholder = {
                             Text(
-                                "Search ${contacts.size} contacts...",
+                                "Search contacts and cells...",
                                 color = T.TextMuted,
                                 fontSize = 14.sp
                             )
@@ -179,6 +185,19 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 horizontalAlignment = Alignment.End
             ) {
+                // Create Cell Group
+                SmallFloatingActionButton(
+                    onClick = { navController.navigate("group_creation") },
+                    containerColor = T.Purple,
+                    contentColor = Color.White
+                ) {
+                    Text(
+                        "CELL",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 10.sp,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                }
                 // Add by Short Code
                 SmallFloatingActionButton(
                     onClick = { navController.navigate("short_code_input") },
@@ -206,13 +225,16 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
             }
         }
     ) { padding ->
-        val filtered = if (searchQuery.isBlank()) contacts else contacts.filter {
+        val filteredContacts = if (searchQuery.isBlank()) contacts else contacts.filter {
             it.name.contains(searchQuery, ignoreCase = true) ||
             it.id.contains(searchQuery, ignoreCase = true)
         }
+        val filteredGroups = if (searchQuery.isBlank()) activeGroups else activeGroups.filter {
+            it.name.contains(searchQuery, ignoreCase = true)
+        }
 
         when {
-            contacts.isEmpty() -> {
+            contacts.isEmpty() && activeGroups.isEmpty() -> {
                 // Premium empty state
                 Box(
                     modifier = Modifier
@@ -235,7 +257,7 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                         )
                         Spacer(modifier = Modifier.height(T.SpaceSm))
                         Text(
-                            "Scan a friend's QR code to start\nmessaging securely",
+                            "Scan a friend's QR code or create a\nCell group to start messaging",
                             fontSize = 14.sp,
                             color = T.TextMuted,
                             textAlign = TextAlign.Center,
@@ -258,7 +280,7 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                     }
                 }
             }
-            filtered.isEmpty() && searchQuery.isNotBlank() -> {
+            filteredContacts.isEmpty() && filteredGroups.isEmpty() && searchQuery.isNotBlank() -> {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -270,14 +292,14 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                         Text("🔍", fontSize = 48.sp)
                         Spacer(modifier = Modifier.height(T.SpaceMd))
                         Text(
-                            "No contacts found",
+                            "No contacts or cells found",
                             fontSize = 16.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = T.TextSecondary
                         )
                         Spacer(modifier = Modifier.height(T.SpaceXs))
                         Text(
-                            "Try a different name or handle",
+                            "Try a different search term",
                             fontSize = 13.sp,
                             color = T.TextMuted
                         )
@@ -291,26 +313,130 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                         .padding(padding)
                         .background(T.Surface0)
                 ) {
-                    items(filtered) { contact ->
-                        val matchedPeer = blePeers.find { peer ->
-                            val matchesAddress = contact.bleAddress != null && peer.address == contact.bleAddress
-                            val matchesFp = peer.fingerprint != null && try {
-                                val contactFp = java.security.MessageDigest.getInstance("SHA-256")
-                                    .digest(Base64.decode(contact.ed25519PubKey, Base64.NO_WRAP))
-                                    .copyOfRange(0, 4)
-                                peer.fingerprint.contentEquals(contactFp)
-                            } catch (_: Exception) { false }
-                            (matchesAddress || matchesFp) && (currentTime - peer.lastSeen < BleManager.PEER_OFFLINE_TIMEOUT_MS)
+                    if (filteredGroups.isNotEmpty()) {
+                        item {
+                            Text(
+                                text = "CELLS",
+                                color = T.TextMuted,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                letterSpacing = 1.sp,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
                         }
-                        val isOnline = matchedPeer != null
-                        PremiumContactRow(
-                            contact = contact,
-                            matchedPeer = matchedPeer,
-                            isOnline = isOnline,
-                            onClick = { navController.navigate("chat/${contact.id}") { launchSingleTop = true } }
+                        items(filteredGroups, key = { "group_${it.groupId}" }) { group ->
+                            CellGroupRow(
+                                group = group,
+                                onClick = { navController.navigate("group_chat/${group.groupId}") { launchSingleTop = true } }
+                            )
+                        }
+                    }
+
+                    if (filteredContacts.isNotEmpty()) {
+                        if (filteredGroups.isNotEmpty()) {
+                            item {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "DIRECT CONTACTS",
+                                    color = T.TextMuted,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    letterSpacing = 1.sp,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                )
+                            }
+                        }
+                        items(filteredContacts, key = { "contact_${it.id}" }) { contact ->
+                            val matchedPeer = blePeers.find { peer ->
+                                val matchesAddress = contact.bleAddress != null && peer.address == contact.bleAddress
+                                val matchesFp = peer.fingerprint != null && try {
+                                    val contactFp = java.security.MessageDigest.getInstance("SHA-256")
+                                        .digest(Base64.decode(contact.ed25519PubKey, Base64.NO_WRAP))
+                                        .copyOfRange(0, 4)
+                                    peer.fingerprint.contentEquals(contactFp)
+                                } catch (_: Exception) { false }
+                                (matchesAddress || matchesFp) && (currentTime - peer.lastSeen < BleManager.PEER_OFFLINE_TIMEOUT_MS)
+                            }
+                            val isOnline = matchedPeer != null
+                            PremiumContactRow(
+                                contact = contact,
+                                matchedPeer = matchedPeer,
+                                isOnline = isOnline,
+                                onClick = { navController.navigate("chat/${contact.id}") { launchSingleTop = true } }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CellGroupRow(
+    group: GroupEntity,
+    onClick: () -> Unit
+) {
+    val T = GhostTheme
+    val memberCount = remember(group.memberContactIdsJson) {
+        try {
+            org.json.JSONArray(group.memberContactIdsJson).length()
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    Surface(
+        color = T.Surface0,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+                .fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            HexagonAvatar(name = group.name, size = T.AvatarMedium)
+
+            Spacer(modifier = Modifier.width(T.SpaceMd))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = group.name,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = T.TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(T.Purple)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "CELL",
+                            color = Color.White,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                         )
                     }
                 }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "$memberCount members · Private mesh cell",
+                    fontSize = 12.sp,
+                    color = T.TextMuted,
+                    maxLines = 1
+                )
             }
         }
     }
