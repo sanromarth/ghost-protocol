@@ -29,7 +29,8 @@ interface ContactDao {
                 ed25519PubKey = contact.ed25519PubKey,
                 x25519PubKey = contact.x25519PubKey,
                 bleAddress = contact.bleAddress ?: existing.bleAddress,
-                isVerified = existing.isVerified || contact.isVerified
+                isVerified = existing.isVerified || contact.isVerified,
+                isIntroduced = existing.isIntroduced || contact.isIntroduced
             )
             insert(updated)
             return 1L
@@ -38,6 +39,9 @@ interface ContactDao {
             return 1L
         }
     }
+
+    @Query("SELECT * FROM contacts WHERE isIntroduced = 1 AND isVerified = 0")
+    fun getIntroducedOnly(): Flow<List<Contact>>
 
     suspend fun getByContactId(contactId: String): Contact? = getById(contactId)
 
@@ -49,6 +53,9 @@ interface ContactDao {
 
     @Query("UPDATE contacts SET isVerified = :isVerified WHERE id = :id")
     suspend fun updateVerified(id: String, isVerified: Boolean)
+
+    @Query("UPDATE contacts SET isIntroduced = :isIntroduced WHERE id = :id")
+    suspend fun updateIntroduced(id: String, isIntroduced: Boolean)
 
     @Delete
     suspend fun delete(contact: Contact)

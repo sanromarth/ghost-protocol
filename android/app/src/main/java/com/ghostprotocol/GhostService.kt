@@ -41,6 +41,8 @@ import com.ghostprotocol.router.GhostRouter
 import com.ghostprotocol.group.GroupMessageReceiver
 import com.ghostprotocol.group.GroupMessageSender
 import com.ghostprotocol.group.GroupProtocol
+import com.ghostprotocol.introduction.IntroductionHandler
+import com.ghostprotocol.introduction.IntroductionProtocol
 import com.ghostprotocol.receipt.DeliveryReceiptHandler
 import com.ghostprotocol.receipt.DeliveryReceiptProtocol
 import com.ghostprotocol.security.SecurityPosture
@@ -63,6 +65,9 @@ class GhostService : Service() {
 
         @Volatile
         var activeReceiptHandler: DeliveryReceiptHandler? = null
+
+        @Volatile
+        var activeIntroductionHandler: IntroductionHandler? = null
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -79,6 +84,7 @@ class GhostService : Service() {
     private lateinit var groupMessageSender: GroupMessageSender
     private lateinit var groupMessageReceiver: GroupMessageReceiver
     private lateinit var deliveryReceiptHandler: DeliveryReceiptHandler
+    private lateinit var introductionHandler: IntroductionHandler
     private var lastEncounterTimeMs: Long = System.currentTimeMillis()
     private var cpuWakeupCount: Int = 0
     private var messagesForwardedCount: Int = 0
@@ -199,6 +205,15 @@ class GhostService : Service() {
             deliveryReceiptHandler = deliveryReceiptHandler
         )
         activeGroupSender = groupMessageSender
+
+        // v0.3.6: Initialize Contact Introduction handler
+        introductionHandler = IntroductionHandler(
+            context = applicationContext,
+            contactDao = db.contactDao(),
+            messageDao = db.messageDao(),
+            scope = serviceScope
+        )
+        activeIntroductionHandler = introductionHandler
 
         // React to posture changes immediately across the service lifecycle
         serviceScope.launch {
@@ -571,6 +586,13 @@ class GhostService : Service() {
                 val hash = MessageDigest.getInstance("SHA-256").digest(senderPubKey)
                 val senderContactId = hash.sliceArray(0 until 8).joinToString("") { "%02x".format(it) }
 
+                // v0.3.6: Demux Opcode 0x50 (Contact Introduction) inside decrypted plaintext
+                if (plaintext.isNotEmpty() && plaintext[0] == IntroductionProtocol.OPCODE_INTRODUCTION) {
+                    Log.d(TAG, "GHOST_INTRO: Demuxed routed introduction packet (0x50) from $senderContactId")
+                    introductionHandler.onIntroductionReceived(senderContactId, plaintext)
+                    return@launch
+                }
+
                 val rawText = String(plaintext, Charsets.UTF_8)
                 val parsed = parseWireText(rawText)
                 val senderName = parsed.senderName
@@ -939,6 +961,13 @@ class GhostService : Service() {
             val md = MessageDigest.getInstance("SHA-256")
             val hash = md.digest(senderPubKey)
             val senderContactId = hash.sliceArray(0 until 8).joinToString("") { "%02x".format(it) }
+
+            // v0.3.6: Demux Opcode 0x50 (Contact Introduction) inside decrypted plaintext
+            if (plaintext.isNotEmpty() && plaintext[0] == IntroductionProtocol.OPCODE_INTRODUCTION) {
+                Log.d(TAG, "GHOST_INTRO: Demuxed direct introduction packet (0x50) from $senderContactId")
+                introductionHandler.onIntroductionReceived(senderContactId, plaintext)
+                return
+            }
 
             val rawText = String(plaintext, Charsets.UTF_8)
             val parsed = parseWireText(rawText)

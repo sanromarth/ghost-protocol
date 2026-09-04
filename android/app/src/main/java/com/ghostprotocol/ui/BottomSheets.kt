@@ -6,11 +6,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Reply
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,12 +21,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.ghostprotocol.GhostService
 import com.ghostprotocol.data.Contact
+import com.ghostprotocol.data.GhostDatabase
 import com.ghostprotocol.data.MessageEntity
+import kotlinx.coroutines.launch
 
 // ======================== Message Actions Sheet ========================
 
@@ -100,6 +108,7 @@ fun ContactInfoBottomSheet(
     val T = GhostTheme
     var showClearConfirm by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showIntroduceDialog by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -161,6 +170,15 @@ fun ContactInfoBottomSheet(
             HorizontalDivider(color = T.Surface3, modifier = Modifier.padding(horizontal = 16.dp))
             Spacer(modifier = Modifier.height(4.dp))
 
+            if (contact.isVerified) {
+                SheetActionRow(
+                    icon = Icons.Filled.Share,
+                    label = "Introduce to...",
+                    tint = T.PurpleLight,
+                    onClick = { showIntroduceDialog = true }
+                )
+            }
+
             SheetActionRow(
                 icon = Icons.Filled.Delete,
                 label = "Clear Chat",
@@ -212,12 +230,23 @@ fun ContactInfoBottomSheet(
             }
         )
     }
+
+    if (showIntroduceDialog) {
+        IntroduceContactDialog(
+            contactToIntroduce = contact,
+            onDismiss = { showIntroduceDialog = false },
+            onIntroductionSent = {
+                showIntroduceDialog = false
+                onDismiss()
+            }
+        )
+    }
 }
 
 // ======================== Shared Components ========================
 
 @Composable
-private fun SheetHandle() {
+internal fun SheetHandle() {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -263,3 +292,138 @@ private fun SheetActionRow(
         )
     }
 }
+
+// ======================== Introduce Contact Dialog ========================
+
+@Composable
+fun IntroduceContactDialog(
+    contactToIntroduce: Contact,
+    onDismiss: () -> Unit,
+    onIntroductionSent: () -> Unit
+) {
+    val T = GhostTheme
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val db = remember { GhostDatabase.getInstance(context) }
+    var verifiedContacts by remember { mutableStateOf<List<Contact>>(emptyList()) }
+    var selectedTarget by remember { mutableStateOf<Contact?>(null) }
+    var showConfirm by remember { mutableStateOf(false) }
+    var isSending by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        val all = db.contactDao().getAllOnce()
+        verifiedContacts = all.filter { it.isVerified && it.id != contactToIntroduce.id }
+    }
+
+    if (showConfirm && selectedTarget != null) {
+        AlertDialog(
+            onDismissRequest = { if (!isSending) showConfirm = false },
+            title = { Text("Cryptographic Introduction", color = T.PurpleLight, fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "Introduce ${contactToIntroduce.name} to ${selectedTarget!!.name}?\n\nThey will receive a signed cryptographic envelope with ${contactToIntroduce.name}'s identity keys.",
+                    color = T.TextPrimary,
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        isSending = true
+                        scope.launch {
+                            val handler = GhostService.activeIntroductionHandler
+                            if (handler != null) {
+                                handler.sendIntroduction(contactToIntroduce, selectedTarget!!)
+                            }
+                            isSending = false
+                            showConfirm = false
+                            onIntroductionSent()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = T.Purple),
+                    enabled = !isSending
+                ) {
+                    Text(if (isSending) "Signing & Sending..." else "Confirm & Sign", color = Color.White)
+                }
+            },
+            dismissButton = {
+                if (!isSending) {
+                    TextButton(onClick = { showConfirm = false }) {
+                        Text("Cancel", color = T.TextSecondary)
+                    }
+                }
+            }
+        )
+    } else {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = {
+                Text(
+                    "Introduce ${contactToIntroduce.name} to...",
+                    fontWeight = FontWeight.Bold,
+                    color = T.TextPrimary
+                )
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth().heightIn(max = 350.dp)) {
+                    if (verifiedContacts.isEmpty()) {
+                        Text(
+                            "No other mutually verified contacts found. You can only introduce to contacts you have verified.",
+                            color = T.TextMuted,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(vertical = 12.dp)
+                        )
+                    } else {
+                        LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                            items(verifiedContacts) { target ->
+                                val targetPub = remember(target.ed25519PubKey) {
+                                    try { Base64.decode(target.ed25519PubKey, Base64.NO_WRAP) } catch (_: Exception) { null }
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            selectedTarget = target
+                                            showConfirm = true
+                                        }
+                                        .padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    GhostAvatar(
+                                        pubkey = targetPub,
+                                        name = target.name,
+                                        size = T.AvatarSmall,
+                                        isMutuallyVerified = true
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column {
+                                        Text(
+                                            text = target.name,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = T.TextPrimary,
+                                            fontSize = 15.sp
+                                        )
+                                        Text(
+                                            text = "#${target.id.take(6)}",
+                                            color = T.TextMuted,
+                                            fontSize = 12.sp,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                    }
+                                }
+                                HorizontalDivider(color = T.Surface2)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = onDismiss) {
+                    Text("Close", color = T.TextSecondary)
+                }
+            }
+        )
+    }
+}
+

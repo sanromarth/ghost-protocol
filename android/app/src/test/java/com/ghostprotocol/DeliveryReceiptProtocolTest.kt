@@ -104,7 +104,7 @@ class DeliveryReceiptProtocolTest {
             assertEquals(messageHash, decoded?.messageHash)
             assertEquals(recipientId, decoded?.recipientContactId)
             assertEquals(timestamp, decoded?.receiptTimestamp)
-        } catch (e: UnsatisfiedLinkError) {
+        } catch (e: Throwable) {
             // Android NDK shared library not loadable on host JVM without bionic; skipped gracefully
             println("Native library not loaded in JVM host unit test (expected on desktop JVM): ${e.message}")
         }

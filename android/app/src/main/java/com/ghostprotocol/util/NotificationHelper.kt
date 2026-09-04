@@ -23,6 +23,7 @@ object NotificationHelper {
     private const val CHANNEL_VERIFY = "ghost_verify_channel_v2"
     const val CHANNEL_SERVICE = "ghost_mesh_channel"
     const val CHANNEL_DISCOVERY = "ghost_discovery_channel"
+    const val CHANNEL_INTRODUCTIONS = "ghost_introductions_channel"
 
     const val ACTION_CYCLE_POSTURE = "ACTION_CYCLE_POSTURE"
     const val ACTION_CYCLE_MODE = "ACTION_CYCLE_MODE"
@@ -352,6 +353,64 @@ object NotificationHelper {
             Log.d(TAG, "GHOST_GROUP: Group notification posted for group $groupName (id=$notificationId)")
         } catch (e: Exception) {
             Log.e(TAG, "GHOST_GROUP: Error showing group notification: ${e.message}", e)
+        }
+    }
+
+    private fun ensureIntroductionsChannel(manager: NotificationManager) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (manager.getNotificationChannel(CHANNEL_INTRODUCTIONS) == null) {
+                val channel = NotificationChannel(
+                    CHANNEL_INTRODUCTIONS,
+                    "Contact Introductions",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Cryptographic contact introductions from verified peers"
+                    enableVibration(false)
+                }
+                manager.createNotificationChannel(channel)
+            }
+        }
+    }
+
+    fun showIntroductionNotification(
+        context: Context,
+        voucherName: String,
+        introducedName: String,
+        introducedContactId: String
+    ) {
+        try {
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            ensureIntroductionsChannel(manager)
+
+            val openIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                action = "review_introduction"
+                putExtra("action", "review_introduction")
+                putExtra("introduced_contact_id", introducedContactId)
+            }
+            val openPendingIntent = PendingIntent.getActivity(
+                context,
+                ((introducedContactId.hashCode() * 37 + 13) and 0x7FFFFFFF),
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val shortHandle = introducedContactId.take(6)
+            val notificationId = 7000 + (introducedContactId.hashCode() and 0xFFFF)
+            val notification = NotificationCompat.Builder(context, CHANNEL_INTRODUCTIONS)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle("$voucherName vouches for $introducedName (#$shortHandle)")
+                .setContentText("Tap to review this cryptographic introduction")
+                .setColor(0xFF9D4EDD.toInt())
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(openPendingIntent)
+                .build()
+
+            manager.notify(notificationId, notification)
+            Log.d(TAG, "GHOST_INTRO: Introduction notification posted for $introducedName (id=$notificationId)")
+        } catch (e: Exception) {
+            Log.e(TAG, "GHOST_INTRO: Error showing introduction notification: ${e.message}", e)
         }
     }
 }

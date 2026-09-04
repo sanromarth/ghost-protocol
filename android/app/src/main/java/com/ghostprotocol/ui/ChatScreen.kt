@@ -313,6 +313,7 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
     // Build grouped message items (messages + time separators)
     val reversedMessages = messages.reversed()
     val chatItems = remember(reversedMessages) { buildChatItems(reversedMessages) }
+    val isMutuallyVerified = messages.any { it.content.startsWith("* mutual verification with ") } || contact?.isVerified == true
 
     Scaffold(
         containerColor = T.Surface0,
@@ -338,7 +339,6 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                         )
                     }
 
-                    val isMutuallyVerified = messages.any { it.content.startsWith("* mutual verification with ") } || contact?.isVerified == true
                     val blePeers by BleManager.peers.collectAsState()
                     val matchedPeer = contact?.let { c ->
                         blePeers.find { peer ->
@@ -370,12 +370,30 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                     }
 
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            contact?.name ?: "Chat",
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 18.sp,
-                            color = T.TextPrimary
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                contact?.name ?: "Chat",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 18.sp,
+                                color = T.TextPrimary
+                            )
+                            if (contact?.isIntroduced == true && !isMutuallyVerified) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .border(1.dp, Color(0xFF3F3F46), RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 5.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = "INTRODUCED",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFFA1A1AA),
+                                        letterSpacing = 0.5.sp
+                                    )
+                                }
+                            }
+                        }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
                                 text = "#" + (contact?.id?.take(6) ?: ""),
@@ -517,71 +535,109 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
             }
         }
     ) { padding ->
-        if (messages.isEmpty()) {
-            // Premium empty state
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .background(T.Surface0),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("💬", fontSize = 56.sp)
-                    Spacer(modifier = Modifier.height(T.SpaceMd))
-                    Text(
-                        "No messages yet",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = T.TextSecondary
-                    )
-                    Spacer(modifier = Modifier.height(T.SpaceSm))
-                    Text(
-                        "Say hi to start the conversation 👋",
-                        fontSize = 14.sp,
-                        color = T.TextMuted,
-                        textAlign = TextAlign.Center
-                    )
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .background(T.Surface0)
+        ) {
+            // One-way trust banner for introduced contacts
+            if (contact?.isIntroduced == true && !isMutuallyVerified) {
+                Surface(
+                    color = T.Surface1,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .clickable { navController.navigate("qr_scan") }
+                        .border(1.dp, T.PurpleLight.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "One-way introduction via Trust Web",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = T.PurpleLight
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Tap to verify for full mutual trust",
+                            fontSize = 11.sp,
+                            color = T.TextMuted
+                        )
+                    }
                 }
             }
-        } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .background(T.Surface0)
-                    .padding(horizontal = 12.dp),
-                contentPadding = PaddingValues(vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-                reverseLayout = true
-            ) {
-                items(chatItems, key = { it.key }) { item ->
-                    when (item) {
-                        is ChatItem.TimeHeader -> TimeHeaderBubble(item.label)
-                        is ChatItem.Msg -> {
-                            if (item.message.content.startsWith("* ") && item.message.content.endsWith(" *")) {
-                                SystemVerificationBubble(item.message)
-                            } else {
-                                SwipeableMessage(
-                                    onReply = { replyToMessage = item.message },
-                                    onCopy = {
-                                        clipboardManager.setText(AnnotatedString(item.message.content))
-                                    },
-                                    onDelete = {
-                                        selectedMessage = item.message
-                                        showMessageActions = true
-                                    }
-                                ) {
-                                    PremiumMessageBubble(
-                                        message = item.message,
-                                        groupPosition = item.groupPosition,
-                                        onRetry = { viewModel.retryMessage(it) },
-                                        onLongPress = {
-                                            selectedMessage = item.message
-                                            showMessageActions = true
+
+            Box(modifier = Modifier.weight(1f)) {
+                if (messages.isEmpty()) {
+                    // Premium empty state
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(T.Surface0),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("💬", fontSize = 56.sp)
+                            Spacer(modifier = Modifier.height(T.SpaceMd))
+                            Text(
+                                "No messages yet",
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = T.TextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(T.SpaceSm))
+                            Text(
+                                "Say hi to start the conversation 👋",
+                                fontSize = 14.sp,
+                                color = T.TextMuted,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(T.Surface0)
+                            .padding(horizontal = 12.dp),
+                        contentPadding = PaddingValues(vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                        reverseLayout = true
+                    ) {
+                        items(chatItems, key = { it.key }) { item ->
+                            when (item) {
+                                is ChatItem.TimeHeader -> TimeHeaderBubble(item.label)
+                                is ChatItem.Msg -> {
+                                    if (item.message.content.startsWith("* ") && item.message.content.endsWith(" *")) {
+                                        SystemVerificationBubble(item.message)
+                                    } else {
+                                        SwipeableMessage(
+                                            onReply = { replyToMessage = item.message },
+                                            onCopy = {
+                                                clipboardManager.setText(AnnotatedString(item.message.content))
+                                            },
+                                            onDelete = {
+                                                selectedMessage = item.message
+                                                showMessageActions = true
+                                            }
+                                        ) {
+                                            PremiumMessageBubble(
+                                                message = item.message,
+                                                groupPosition = item.groupPosition,
+                                                onRetry = { viewModel.retryMessage(it) },
+                                                onLongPress = {
+                                                    selectedMessage = item.message
+                                                    showMessageActions = true
+                                                }
+                                            )
                                         }
-                                    )
+                                    }
                                 }
                             }
                         }

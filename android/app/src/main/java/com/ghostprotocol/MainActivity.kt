@@ -64,6 +64,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         IdentityManager.init(this)
@@ -143,13 +148,37 @@ class MainActivity : ComponentActivity() {
                             composable("short_code_input") { ShortCodeInputScreen(navController) }
                         }
 
-                        // Auto-navigate to group if opened from a group notification
+                        var reviewIntroducedId by remember { mutableStateOf<String?>(null) }
+
+                        // Auto-navigate to group if opened from a group notification or review introduction
                         androidx.compose.runtime.LaunchedEffect(intent) {
                             val openGroupId = intent.getStringExtra("OPEN_GROUP_ID")
                             if (!openGroupId.isNullOrEmpty()) {
                                 navController.navigate("group_chat/$openGroupId")
                                 intent.removeExtra("OPEN_GROUP_ID")
                             }
+
+                            val action = intent.action ?: intent.getStringExtra("action")
+                            if (action == "review_introduction") {
+                                val introId = intent.getStringExtra("introduced_contact_id")
+                                if (!introId.isNullOrEmpty()) {
+                                    reviewIntroducedId = introId
+                                    intent.removeExtra("introduced_contact_id")
+                                    intent.removeExtra("action")
+                                }
+                            }
+                        }
+
+                        if (reviewIntroducedId != null) {
+                            com.ghostprotocol.ui.IntroductionReviewBottomSheet(
+                                introducedContactId = reviewIntroducedId!!,
+                                onDismiss = { reviewIntroducedId = null },
+                                onContactAdded = {
+                                    navController.navigate("contacts") {
+                                        popUpTo("contacts") { inclusive = true }
+                                    }
+                                }
+                            )
                         }
                     }
                 }
