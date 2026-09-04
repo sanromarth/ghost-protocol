@@ -15,7 +15,7 @@ import com.ghostprotocol.power.TelemetryEntity
         GroupEntity::class,
         GroupMessageEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 abstract class GhostDatabase : RoomDatabase() {
@@ -67,6 +67,16 @@ abstract class GhostDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE messages ADD COLUMN contentHash TEXT")
+                database.execSQL("ALTER TABLE group_messages ADD COLUMN contentHash TEXT")
+                database.execSQL("ALTER TABLE group_messages ADD COLUMN deliveredMemberIdsJson TEXT NOT NULL DEFAULT '[]'")
+                database.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_contentHash ON messages(contentHash)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS idx_group_messages_contentHash ON group_messages(contentHash)")
+            }
+        }
+
         fun getInstance(context: Context): GhostDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -74,7 +84,7 @@ abstract class GhostDatabase : RoomDatabase() {
                     GhostDatabase::class.java,
                     "ghost_database"
                 )
-                .addMigrations(MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 .fallbackToDestructiveMigration()
                 .build()
                 INSTANCE = instance

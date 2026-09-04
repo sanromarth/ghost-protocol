@@ -41,6 +41,8 @@ import com.ghostprotocol.router.GhostRouter
 import com.ghostprotocol.group.GroupMessageReceiver
 import com.ghostprotocol.group.GroupMessageSender
 import com.ghostprotocol.group.GroupProtocol
+import com.ghostprotocol.receipt.DeliveryReceiptHandler
+import com.ghostprotocol.receipt.DeliveryReceiptProtocol
 import com.ghostprotocol.security.SecurityPosture
 import com.ghostprotocol.security.SecurityPostureManager
 import com.ghostprotocol.security.ShortCodeManager
@@ -58,6 +60,9 @@ class GhostService : Service() {
 
         @Volatile
         var activeGroupSender: GroupMessageSender? = null
+
+        @Volatile
+        var activeReceiptHandler: DeliveryReceiptHandler? = null
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -65,7 +70,7 @@ class GhostService : Service() {
     private var ghostRouter: GhostRouter? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // v0.2/v0.3: Power policy engine, security posture manager, discovery manager, short code manager, and telemetry
+    // v0.2/v0.3/v0.3.7: Power policy, security posture, discovery, short code, telemetry, group, and delivery receipts
     private lateinit var powerPolicyEngine: PowerPolicyEngine
     private lateinit var securityPostureManager: SecurityPostureManager
     private lateinit var discoveryManager: DiscoveryManager
@@ -73,6 +78,7 @@ class GhostService : Service() {
     private lateinit var batteryTelemetry: BatteryTelemetry
     private lateinit var groupMessageSender: GroupMessageSender
     private lateinit var groupMessageReceiver: GroupMessageReceiver
+    private lateinit var deliveryReceiptHandler: DeliveryReceiptHandler
     private var lastEncounterTimeMs: Long = System.currentTimeMillis()
     private var cpuWakeupCount: Int = 0
     private var messagesForwardedCount: Int = 0
@@ -165,6 +171,17 @@ class GhostService : Service() {
             ghostRouter?.sendMessage(dstPeerId, payload)
         }
 
+        // v0.3.7: Initialize Delivery Receipts handler
+        deliveryReceiptHandler = DeliveryReceiptHandler(
+            contactDao = db.contactDao(),
+            messageDao = db.messageDao(),
+            groupMessageDao = db.groupMessageDao(),
+            routerProvider = { ghostRouter },
+            scope = serviceScope,
+            sharedSignatureCache = recentMessageSignatures
+        )
+        activeReceiptHandler = deliveryReceiptHandler
+
         // v0.3.5: Initialize Cell Group messaging
         groupMessageSender = GroupMessageSender(
             groupDao = db.groupDao(),
@@ -178,7 +195,8 @@ class GhostService : Service() {
             contactDao = db.contactDao(),
             groupMessageDao = db.groupMessageDao(),
             scope = serviceScope,
-            sharedSignatureCache = recentMessageSignatures
+            sharedSignatureCache = recentMessageSignatures,
+            deliveryReceiptHandler = deliveryReceiptHandler
         )
         activeGroupSender = groupMessageSender
 
@@ -439,12 +457,82 @@ class GhostService : Service() {
     }
 
     /**
+     * Parsed 1:1 wire plaintext envelope.
+     * Supports:
+     * - name\0TS\0timestamp\0REPLY\0quotedSender\0quotedText\0body
+     * - name\0TS\0timestamp\0body
+     * - name\0REPLY\0quotedSender\0quotedText\0body (legacy)
+     * - name\0body (legacy)
+     */
+    data class ParsedWireMessage(
+        val senderName: String?,
+        val timestamp: Long,
+        val text: String,
+        val replySender: String?,
+        val replyText: String?
+    )
+
+    private fun parseWireText(rawText: String): ParsedWireMessage {
+        val parts = rawText.split('\u0000')
+        return if (parts.size >= 3 && parts[1] == "TS") {
+            val senderName = parts[0].ifEmpty { null }
+            val ts = parts[2].toLongOrNull() ?: System.currentTimeMillis()
+            val remainder = parts.drop(3)
+            if (remainder.size >= 4 && remainder[0] == "REPLY") {
+                ParsedWireMessage(
+                    senderName = senderName,
+                    timestamp = ts,
+                    text = remainder.drop(3).joinToString("\u0000"),
+                    replySender = remainder[1].ifEmpty { null },
+                    replyText = remainder[2].ifEmpty { null }
+                )
+            } else {
+                ParsedWireMessage(
+                    senderName = senderName,
+                    timestamp = ts,
+                    text = remainder.joinToString("\u0000"),
+                    replySender = null,
+                    replyText = null
+                )
+            }
+        } else if (parts.size >= 5 && parts[1] == "REPLY") {
+            ParsedWireMessage(
+                senderName = parts[0].ifEmpty { null },
+                timestamp = System.currentTimeMillis(),
+                text = parts.drop(4).joinToString("\u0000"),
+                replySender = parts[2].ifEmpty { null },
+                replyText = parts[3].ifEmpty { null }
+            )
+        } else if (parts.size >= 2) {
+            ParsedWireMessage(
+                senderName = parts[0].ifEmpty { null },
+                timestamp = System.currentTimeMillis(),
+                text = parts.drop(1).joinToString("\u0000"),
+                replySender = null,
+                replyText = null
+            )
+        } else {
+            ParsedWireMessage(
+                senderName = null,
+                timestamp = System.currentTimeMillis(),
+                text = rawText,
+                replySender = null,
+                replyText = null
+            )
+        }
+    }
+
+    /**
      * Process a payload delivered via the mesh router (multi-hop).
      * Same decryption logic as direct messages.
      */
     private fun processRoutedPayload(ciphertext: ByteArray) {
         if (ciphertext.isNotEmpty()) {
-            if (ciphertext[0] == GroupProtocol.OPCODE_GROUP_ENVELOPE) {
+            if (ciphertext[0] == DeliveryReceiptProtocol.OPCODE_DELIVERY_RECEIPT) {
+                Log.d(TAG, "GHOST_RECEIPT: Received routed delivery receipt (0x40)")
+                deliveryReceiptHandler.onReceiptReceived(ciphertext)
+                return
+            } else if (ciphertext[0] == GroupProtocol.OPCODE_GROUP_ENVELOPE) {
                 Log.d(TAG, "GHOST_GROUP: Received routed group message envelope (0x30)")
                 groupMessageReceiver.onGroupMessageReceived(ciphertext)
                 return
@@ -483,31 +571,14 @@ class GhostService : Service() {
                 val hash = MessageDigest.getInstance("SHA-256").digest(senderPubKey)
                 val senderContactId = hash.sliceArray(0 until 8).joinToString("") { "%02x".format(it) }
 
-                // Reply wire format: senderName\u0000REPLY\u0000quotedSender\u0000quotedText\u0000message
-                // Backward-compatible: non-reply messages use senderName\u0000message (no REPLY token)
                 val rawText = String(plaintext, Charsets.UTF_8)
-                val parts = rawText.split('\u0000')
-                val senderName: String?
-                val replySender: String?
-                val replyText: String?
-                val text: String
+                val parsed = parseWireText(rawText)
+                val senderName = parsed.senderName
+                val replySender = parsed.replySender
+                val replyText = parsed.replyText
+                val text = parsed.text
+                val messageTimestamp = parsed.timestamp
 
-                if (parts.size >= 5 && parts[1] == "REPLY") {
-                    senderName = parts[0].ifEmpty { null }
-                    replySender = parts[2].ifEmpty { null }
-                    replyText = parts[3].ifEmpty { null }
-                    text = parts.drop(4).joinToString("\u0000")
-                } else if (parts.size >= 2) {
-                    senderName = parts[0].ifEmpty { null }
-                    replySender = null
-                    replyText = null
-                    text = parts.drop(1).joinToString("\u0000")
-                } else {
-                    senderName = null
-                    replySender = null
-                    replyText = null
-                    text = rawText
-                }
                 Log.d(TAG, ">>> ROUTED DECRYPT SUCCESS: from=$senderContactId text=\"$text\" verified=$isVerified")
 
                 val contact = contactDao.getById(senderContactId)
@@ -532,10 +603,22 @@ class GhostService : Service() {
                     Log.d(TAG, ">>> NAME UPDATE received from '${senderName}', no message to save")
                     return@launch
                 }
+
+                // Compute deterministic content hash across sender ID, original timestamp, and clean body
+                val contentHash = DeliveryReceiptProtocol.computeMessageHash(
+                    senderContactId = senderContactId,
+                    timestamp = messageTimestamp,
+                    plaintext = text
+                )
+
+                // First-delivery check: if row with contentHash exists, drop as duplicate and do not send receipt
+                val existingMsg = messageDao.getByContentHash(contentHash)
+                if (existingMsg != null) {
+                    Log.d(TAG, ">>> DEDUP: 1:1 message already exists in DB with hash $contentHash, skipping")
+                    return@launch
+                }
+
                 // Content & Signature-based dedup:
-                // Ed25519 signatures are deterministic over (senderPubKey || plaintext).
-                // Multiple deliveries via direct BLE, Go router, and mesh sprays share the identical signature
-                // even when separately encrypted with different ephemeral keys.
                 val sigHex = signature.joinToString("") { "%02x".format(it) }
                 val contentKey = "$senderContactId:$text"
                 val now = System.currentTimeMillis()
@@ -560,13 +643,24 @@ class GhostService : Service() {
                     contactId = senderContactId,
                     content = text,
                     isOutgoing = false,
-                    timestamp = System.currentTimeMillis(),
+                    timestamp = messageTimestamp,
                     isVerified = isVerified,
+                    status = MessageEntity.STATUS_DELIVERED,
                     replyToSender = replySender,
-                    replyToText = replyText
+                    replyToText = replyText,
+                    contentHash = contentHash
                 )
-                messageDao.insert(message)
-                Log.d(TAG, ">>> ROUTED MESSAGE SAVED: from '${senderName ?: contact.name}' text=\"$text\"")
+                val newId = messageDao.insert(message)
+                if (newId > 0) {
+                    messagesDeliveredCount++
+                    Log.d(TAG, ">>> ROUTED MESSAGE SAVED: from '${senderName ?: contact.name}' text=\"$text\"")
+
+                    // Fire delivery receipt back to original sender (first delivery only, skip system events)
+                    if (!text.startsWith("* verified ") && !text.startsWith("* mutual verification with ")) {
+                        deliveryReceiptHandler.sendReceipt(senderContactId, contentHash)
+                    }
+                }
+
                 checkAndHandleVerificationEvent(senderContactId, senderName ?: contact.name, text, messageDao, contactDao)
 
             } catch (e: Exception) {
@@ -700,9 +794,9 @@ class GhostService : Service() {
 
                                 for (msg in pendingRoom) {
                                     val wireText = if (msg.replyToText != null) {
-                                        "$myName\u0000REPLY\u0000${msg.replyToSender ?: ""}\u0000${msg.replyToText}\u0000${msg.content}"
+                                        "$myName\u0000TS\u0000${msg.timestamp}\u0000REPLY\u0000${msg.replyToSender ?: ""}\u0000${msg.replyToText}\u0000${msg.content}"
                                     } else {
-                                        "$myName\u0000${msg.content}"
+                                        "$myName\u0000TS\u0000${msg.timestamp}\u0000${msg.content}"
                                     }
                                     val plaintextBytes = wireText.toByteArray(Charsets.UTF_8)
                                     val payload = myEd25519PubKey + plaintextBytes
@@ -807,7 +901,11 @@ class GhostService : Service() {
         messageDao: com.ghostprotocol.data.MessageDao
     ) {
         if (data.isNotEmpty()) {
-            if (data[0] == GroupProtocol.OPCODE_GROUP_ENVELOPE) {
+            if (data[0] == DeliveryReceiptProtocol.OPCODE_DELIVERY_RECEIPT) {
+                Log.d(TAG, "GHOST_RECEIPT: Direct received delivery receipt (0x40)")
+                deliveryReceiptHandler.onReceiptReceived(data)
+                return
+            } else if (data[0] == GroupProtocol.OPCODE_GROUP_ENVELOPE) {
                 Log.d(TAG, "GHOST_GROUP: Direct received group message envelope (0x30)")
                 groupMessageReceiver.onGroupMessageReceived(data)
                 return
@@ -842,31 +940,14 @@ class GhostService : Service() {
             val hash = md.digest(senderPubKey)
             val senderContactId = hash.sliceArray(0 until 8).joinToString("") { "%02x".format(it) }
 
-            // Reply wire format: senderName\u0000REPLY\u0000quotedSender\u0000quotedText\u0000message
-            // Backward-compatible: non-reply messages use senderName\u0000message (no REPLY token)
             val rawText = String(plaintext, Charsets.UTF_8)
-            val parts = rawText.split('\u0000')
-            val senderName: String?
-            val replySender: String?
-            val replyText: String?
-            val text: String
+            val parsed = parseWireText(rawText)
+            val senderName = parsed.senderName
+            val replySender = parsed.replySender
+            val replyText = parsed.replyText
+            val text = parsed.text
+            val messageTimestamp = parsed.timestamp
 
-            if (parts.size >= 5 && parts[1] == "REPLY") {
-                senderName = parts[0].ifEmpty { null }
-                replySender = parts[2].ifEmpty { null }
-                replyText = parts[3].ifEmpty { null }
-                text = parts.drop(4).joinToString("\u0000")
-            } else if (parts.size >= 2) {
-                senderName = parts[0].ifEmpty { null }
-                replySender = null
-                replyText = null
-                text = parts.drop(1).joinToString("\u0000")
-            } else {
-                senderName = null
-                replySender = null
-                replyText = null
-                text = rawText
-            }
             Log.d(TAG, ">>> DECRYPT SUCCESS: from contactId=$senderContactId text=\"$text\" verified=$isVerified")
 
             val contact = contactDao.getById(senderContactId)
@@ -891,9 +972,22 @@ class GhostService : Service() {
                 Log.d(TAG, ">>> NAME UPDATE received from '${senderName}', no message to save")
                 return
             }
+
+            // Compute deterministic content hash across sender ID, original timestamp, and clean body
+            val contentHash = DeliveryReceiptProtocol.computeMessageHash(
+                senderContactId = senderContactId,
+                timestamp = messageTimestamp,
+                plaintext = text
+            )
+
+            // First-delivery check: if row with contentHash exists, drop as duplicate and do not send receipt
+            val existingMsg = messageDao.getByContentHash(contentHash)
+            if (existingMsg != null) {
+                Log.d(TAG, ">>> DEDUP: direct message already in DB with hash $contentHash, skipping")
+                return
+            }
+
             // Content & Signature-based dedup:
-            // Ed25519 signatures are deterministic over (senderPubKey || plaintext).
-            // Retransmissions and parallel direct/routed deliveries share the identical signature.
             val sigHex = signature.joinToString("") { "%02x".format(it) }
             val contentKey = "$senderContactId:$text"
             val now = System.currentTimeMillis()
@@ -918,14 +1012,24 @@ class GhostService : Service() {
                 contactId = senderContactId,
                 content = text,
                 isOutgoing = false,
-                timestamp = System.currentTimeMillis(),
+                timestamp = messageTimestamp,
                 isVerified = isVerified,
+                status = MessageEntity.STATUS_DELIVERED,
                 replyToSender = replySender,
-                replyToText = replyText
+                replyToText = replyText,
+                contentHash = contentHash
             )
-            messageDao.insert(message)
-            messagesDeliveredCount++
-            Log.d(TAG, ">>> MESSAGE SAVED: from '${senderName ?: contact.name}' text=\"$text\"")
+            val newId = messageDao.insert(message)
+            if (newId > 0) {
+                messagesDeliveredCount++
+                Log.d(TAG, ">>> MESSAGE SAVED: from '${senderName ?: contact.name}' text=\"$text\"")
+
+                // Fire delivery receipt back to original sender (first delivery only, skip system events)
+                if (!text.startsWith("* verified ") && !text.startsWith("* mutual verification with ")) {
+                    deliveryReceiptHandler.sendReceipt(senderContactId, contentHash)
+                }
+            }
+
             checkAndHandleVerificationEvent(senderContactId, senderName ?: contact.name, text, messageDao, contactDao)
 
         } catch (e: Exception) {

@@ -4,6 +4,38 @@ All notable changes to the GHOST Protocol project are documented in this file.
 
 ---
 
+## [v0.3.7] — 2026-09-04
+
+Major feature release implementing **Delivery Receipts** (`✓✓`) — end-to-end cryptographic acknowledgments (Opcode `0x40`) proving that a recipient has successfully decrypted and committed a message to Room database storage.
+
+### Added
+- **Cryptographic Delivery Receipts (Opcode `0x40`):**
+  - Fixes the radio-only acknowledgment gap where `STATUS_SENT` (`✓`) only verified local GATT stack write.
+  - Generates a signed 153-byte wire acknowledgment when destination completes local decryption and storage:
+    `[1B: 0x40][64B: messageHash hex][16B: recipientContactId][8B: timestamp BE][64B: Ed25519 signature]`
+  - Signed using recipient's Ed25519 identity seed; verified by sender against recipient's pinned public key.
+  - Fits cleanly in a single BLE GATT write without L2CAP fragmentation (153 bytes << 512-byte MTU).
+- **Deterministic Content Hashing & Wire Timestamp Sync:**
+  - Standardized content hash computation across 1:1 and Cell Group messages:
+    `SHA-256(senderContactId || timestampBE || plaintext)`
+  - Solved clock skew and hash divergence on 1:1 messages by prefixing wire payload with an explicit timestamp token:
+    `name\0TS\0timestamp\0[REPLY\0...]body`
+  - Receiver parses and strips the `TS` token, saving the pristine plaintext into Room DB while computing the exact matching hash.
+- **Room Database Migration v7 → v8 (`MIGRATION_7_8`):**
+  - Added indexed `contentHash` column to `messages` and `group_messages` for instant receipt lookup without full table scans.
+  - Added `deliveredMemberIdsJson` JSON text column to `group_messages` tracking per-member delivery acknowledgments.
+- **Storm Prevention & Terminal Dispatch:**
+  - First-delivery-only execution: receipts fire strictly on initial Room DB insertion (`getByContentHash == null`). Duplicate deliveries from multi-hop spray copies or re-encounter flushes are dropped silently.
+  - Opcode `0x40` is terminal — no receipts are generated for delivery receipt packets.
+  - System verification notices (`* ` prefix) are suppressed from triggering receipts.
+  - Shared deduplication cache protects against receipt packet replay.
+- **Tactical UI Status Feedback:**
+  - 1:1 Chat: Upgraded `StatusIndicator` with overlapping GhostPurple double checkmarks (`✓✓`) for `STATUS_DELIVERED` (status 2), maintaining visual consistency with single check (`✓`) for `STATUS_SENT`.
+  - Cell Groups: Outgoing message bubbles show live delivery count (`"Delivered to X/Y"`).
+  - `GroupDeliveryDetailSheet`: Modal bottom sheet displaying real-time per-member status (`DELIVERED` vs `PENDING`) with member roles and status indicators.
+
+---
+
 ## [v0.3.5] — 2026-09-04
 
 Major feature release implementing **Cell Groups** — private, verified group chat for up to 8 members using pairwise end-to-end encryption.

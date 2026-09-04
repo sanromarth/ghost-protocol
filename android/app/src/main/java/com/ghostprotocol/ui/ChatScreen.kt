@@ -17,9 +17,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import com.ghostprotocol.receipt.DeliveryReceiptProtocol
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -96,14 +98,23 @@ class ChatViewModel(application: Application, private val contactId: String) : A
 
                 val myEd25519PubKey = IdentityManager.getEd25519PubKey()
                 val myName = IdentityManager.getDisplayName()
-                // Reply wire format: senderName\u0000REPLY\u0000quotedSender\u0000quotedText\u0000message
-                // Backward-compatible: non-reply messages use senderName\u0000message (no REPLY token)
+                val timestamp = System.currentTimeMillis()
+                val myContactId = IdentityManager.getContactId()
+                val contentHash = DeliveryReceiptProtocol.computeMessageHash(
+                    senderContactId = myContactId,
+                    timestamp = timestamp,
+                    plaintext = text
+                )
+
+                // Wire format with TS token:
+                // Normal: senderName\u0000TS\u0000timestamp\u0000message
+                // Reply:  senderName\u0000TS\u0000timestamp\u0000REPLY\u0000quotedSender\u0000quotedText\u0000message
                 val plaintextBytes = if (replyTo != null) {
                     val quotedSender = if (replyTo.isOutgoing) "You" else (replySenderName ?: "Contact")
                     val quotedText = replyTo.content.take(120)
-                    (myName + "\u0000REPLY\u0000" + quotedSender + "\u0000" + quotedText + "\u0000" + text).toByteArray(Charsets.UTF_8)
+                    (myName + "\u0000TS\u0000" + timestamp + "\u0000REPLY\u0000" + quotedSender + "\u0000" + quotedText + "\u0000" + text).toByteArray(Charsets.UTF_8)
                 } else {
-                    (myName + "\u0000" + text).toByteArray(Charsets.UTF_8)
+                    (myName + "\u0000TS\u0000" + timestamp + "\u0000" + text).toByteArray(Charsets.UTF_8)
                 }
 
                 val payload = myEd25519PubKey + plaintextBytes
@@ -117,12 +128,13 @@ class ChatViewModel(application: Application, private val contactId: String) : A
                     contactId = contactId,
                     content = text,
                     isOutgoing = true,
-                    timestamp = System.currentTimeMillis(),
+                    timestamp = timestamp,
                     isVerified = true,
                     status = MessageEntity.STATUS_PENDING,
                     replyToId = replyTo?.id,
                     replyToSender = if (replyTo != null) (if (replyTo.isOutgoing) "You" else (replySenderName ?: "Contact")) else null,
-                    replyToText = replyTo?.content?.take(120)
+                    replyToText = replyTo?.content?.take(120),
+                    contentHash = contentHash
                 )
                 messageId = message.id
                 messageDao.insert(message)
@@ -203,7 +215,7 @@ class ChatViewModel(application: Application, private val contactId: String) : A
                 val contactX25519Pub = Base64.decode(freshContact.x25519PubKey, Base64.NO_WRAP)
                 val myEd25519PubKey = IdentityManager.getEd25519PubKey()
                 val myName = IdentityManager.getDisplayName()
-                val plaintextBytes = (myName + "\u0000" + message.content).toByteArray(Charsets.UTF_8)
+                val plaintextBytes = (myName + "\u0000TS\u0000" + message.timestamp + "\u0000" + message.content).toByteArray(Charsets.UTF_8)
                 val payload = myEd25519PubKey + plaintextBytes
                 val signature = GhostCrypto.sign(IdentityManager.getEd25519Seed(), payload)
                 val fullPayload = payload + signature
@@ -956,10 +968,10 @@ private fun StatusIndicator(status: Int, isSent: Boolean, pulseScale: Float) {
             )
         }
         MessageEntity.STATUS_SENT -> {
-            Text("✓", fontSize = 12.sp, color = T.PurpleLight)
+            SingleCheck(modifier = Modifier.size(13.dp))
         }
         MessageEntity.STATUS_DELIVERED -> {
-            Text("✓✓", fontSize = 12.sp, color = T.PurpleLight)
+            DoubleCheck(modifier = Modifier.size(15.dp))
         }
         MessageEntity.STATUS_FAILED -> {
             Text("!", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = T.Failed)
@@ -971,6 +983,34 @@ private fun StatusIndicator(status: Int, isSent: Boolean, pulseScale: Float) {
                 fontSize = 11.sp
             )
         }
+    }
+}
+
+@Composable
+private fun SingleCheck(modifier: Modifier = Modifier) {
+    Icon(
+        imageVector = Icons.Default.Check,
+        contentDescription = "Sent",
+        tint = GhostTheme.PurpleLight,
+        modifier = modifier
+    )
+}
+
+@Composable
+private fun DoubleCheck(modifier: Modifier = Modifier) {
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        Icon(
+            imageVector = Icons.Default.Check,
+            contentDescription = "Delivered",
+            tint = GhostTheme.PurpleLight.copy(alpha = 0.65f),
+            modifier = Modifier.size(13.dp).offset(x = (-3).dp)
+        )
+        Icon(
+            imageVector = Icons.Default.Check,
+            contentDescription = "Delivered",
+            tint = GhostTheme.PurpleLight,
+            modifier = Modifier.size(13.dp).offset(x = 3.dp)
+        )
     }
 }
 

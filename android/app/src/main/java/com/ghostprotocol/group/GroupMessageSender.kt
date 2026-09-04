@@ -9,6 +9,7 @@ import com.ghostprotocol.data.ContactDao
 import com.ghostprotocol.data.GroupDao
 import com.ghostprotocol.data.GroupMessageDao
 import com.ghostprotocol.data.GroupMessageEntity
+import com.ghostprotocol.receipt.DeliveryReceiptProtocol
 import com.ghostprotocol.router.GhostRouter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -55,6 +56,11 @@ class GroupMessageSender(
         val myName = IdentityManager.getDisplayName()
         val myEd25519Seed = IdentityManager.getEd25519Seed()
         val now = System.currentTimeMillis()
+        val contentHash = DeliveryReceiptProtocol.computeMessageHash(
+            senderContactId = myContactId,
+            timestamp = now,
+            plaintext = text
+        )
 
         // 1. Insert message into Room DB with STATUS_PENDING
         val message = GroupMessageEntity(
@@ -64,7 +70,8 @@ class GroupMessageSender(
             timestamp = now,
             status = GroupMessageEntity.STATUS_PENDING,
             replyToSender = replyTo?.first,
-            replyToText = replyTo?.second
+            replyToText = replyTo?.second,
+            contentHash = contentHash
         )
         val msgId = groupMessageDao.insert(message)
 

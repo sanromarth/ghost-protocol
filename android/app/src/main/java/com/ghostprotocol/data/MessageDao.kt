@@ -12,7 +12,7 @@ interface MessageDao {
     suspend fun getMessagesForContactOnce(contactId: String): List<MessageEntity>
 
     @Insert
-    suspend fun insert(message: MessageEntity)
+    suspend fun insert(message: MessageEntity): Long
 
     @Query("DELETE FROM messages WHERE contactId = :contactId")
     suspend fun deleteForContact(contactId: String)
@@ -34,4 +34,10 @@ interface MessageDao {
 
     @Query("SELECT * FROM messages WHERE contactId = :contactId AND isOutgoing = 1 AND status IN (0, 4) ORDER BY timestamp ASC")
     suspend fun getSprayedOrPendingForContact(contactId: String): List<MessageEntity>
+
+    @Query("SELECT * FROM messages WHERE contentHash = :hash LIMIT 1")
+    suspend fun getByContentHash(hash: String): MessageEntity?
+
+    @Query("UPDATE messages SET status = :status WHERE contentHash = :hash")
+    suspend fun updateStatusByHash(hash: String, status: Int)
 }

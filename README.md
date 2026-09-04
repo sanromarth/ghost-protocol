@@ -51,7 +51,7 @@ GHOST is engineered around real physical constraints:
 
 ## Wire Protocol Opcodes
 
-GHOST demuxes incoming GATT payloads at byte 0. Opcodes `0x10` through `0x23` are handled purely at the Kotlin layer for immediate local consent, while `0x01` and `0x30` route through the Go mesh engine:
+GHOST demuxes incoming GATT payloads at byte 0. Opcodes `0x10` through `0x23` and `0x40` are handled at the Kotlin protocol layer, while `0x01` and `0x30` route through the Go mesh engine:
 
 | Opcode | Protocol | Purpose | Payload Format |
 |---|---|---|---|
@@ -63,6 +63,7 @@ GHOST demuxes incoming GATT payloads at byte 0. Opcodes `0x10` through `0x23` ar
 | `0x22` | Short Code | Mesh Multi-Hop Code Query | `[1B 0x22][32B targetCodeHash][32B senderEd25519Pub][64B sig]` |
 | `0x23` | Short Code | Mesh Multi-Hop Code Response| `[1B 0x23][32B responderEd25519Pub][32B responderX25519Pub][64B sig]` |
 | `0x30` | Cell Group| Individual Unicast Envelope | `[1B 0x30][32B groupId][16B senderId][8B ts][ciphertext][64B sig]` |
+| `0x40` | Delivery Receipt | Cryptographic E2E Delivery Ack | `[1B 0x40][64B msgHash][16B recipientId][8B ts][64B sig]` |
 
 ---
 
@@ -76,16 +77,21 @@ GHOST demuxes incoming GATT payloads at byte 0. Opcodes `0x10` through `0x23` ar
 |   - ContactList (CELL chip)   - NORMAL / PROTEST         - ACTIVE / ECO |
 |   - GroupChat / GroupCreate   - EMERGENCY / STEALTH      - CRITICAL     |
 |   - HexagonAvatar / HUD       - 15% Battery Revert       - DEEP SLEEP   |
+|   - DoubleCheck (✓✓ purple)                                             |
 |                                                                         |
 |   DiscoveryManager (0x10/0x11)   ShortCodeManager (0x20-0x23)           |
 |   - 1-Tap Consent Handshake      - BIP-39 2048-Word Dictionary          |
 |   - 20s Per-MAC Throttle         - UTC Midnight Key Rotation            |
 |                                                                         |
-|   Group Messaging Engine (0x30)  Room DB (Schema v7)                    |
-|   - GroupMessageSender           - contacts                             |
-|   - GroupMessageReceiver         - messages                             |
-|   - Deterministic Sig Dedup      - groups & group_messages              |
-|                                  - telemetry_snapshots                  |
+|   Group Messaging Engine (0x30)  DeliveryReceiptHandler (0x40)          |
+|   - GroupMessageSender           - SHA-256 Content Hash Matching        |
+|   - GroupMessageReceiver         - First-Delivery Ed25519 Ack           |
+|   - Deterministic Sig Dedup      - 1:1 ✓✓ & Group X/Y Delivered Sheet   |
+|                                                                         |
+|   Room DB (Schema v8)                                                   |
+|   - contacts & messages (contentHash index)                             |
+|   - groups & group_messages (contentHash + deliveredMemberIdsJson)      |
+|   - telemetry_snapshots                                                 |
 +------------------------------------+------------------------------------+
                                      |
               +----------------------+----------------------+

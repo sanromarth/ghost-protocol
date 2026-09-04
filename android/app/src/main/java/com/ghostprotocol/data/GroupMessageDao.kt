@@ -25,4 +25,10 @@ interface GroupMessageDao {
 
     @Query("DELETE FROM group_messages WHERE groupId = :groupId")
     suspend fun deleteForGroup(groupId: String): Int
+
+    @Query("SELECT * FROM group_messages WHERE contentHash = :hash LIMIT 1")
+    suspend fun getByContentHash(hash: String): GroupMessageEntity?
+
+    @Query("UPDATE group_messages SET deliveredMemberIdsJson = :json WHERE id = :messageId")
+    suspend fun updateDeliveredMembers(messageId: Long, json: String)
 }

@@ -58,6 +58,7 @@ fun GroupChatScreen(
     var group by remember { mutableStateOf<GroupEntity?>(null) }
     var contactsMap by remember { mutableStateOf<Map<String, Contact>>(emptyMap()) }
     var showInfoSheet by remember { mutableStateOf(false) }
+    var deliveryDetailMessage by remember { mutableStateOf<GroupMessageEntity?>(null) }
 
     val messages by db.groupMessageDao().getMessagesForGroup(groupId).collectAsState(initial = emptyList())
     val listState = rememberLazyListState()
@@ -165,12 +166,18 @@ fun GroupChatScreen(
                         contactsMap[message.senderContactId]?.name ?: "Peer ${message.senderContactId.take(4)}"
                     }
 
+                    val totalOther = (memberCount - 1).coerceAtLeast(1)
+
                     GroupMessageBubble(
                         message = message,
                         senderName = senderName,
                         isOutgoing = isOutgoing,
+                        totalOtherMembers = totalOther,
                         onLongClick = {
                             replyTo = Pair(senderName, message.text)
+                        },
+                        onDeliveryStatusClick = {
+                            deliveryDetailMessage = message
                         }
                     )
                     Spacer(modifier = Modifier.height(GhostTheme.SpaceSm))
@@ -293,6 +300,15 @@ fun GroupChatScreen(
             }
         )
     }
+
+    deliveryDetailMessage?.let { detailMsg ->
+        GroupDeliveryDetailSheet(
+            message = detailMsg,
+            group = group,
+            contactsMap = contactsMap,
+            onDismiss = { deliveryDetailMessage = null }
+        )
+    }
 }
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -301,7 +317,9 @@ private fun GroupMessageBubble(
     message: GroupMessageEntity,
     senderName: String,
     isOutgoing: Boolean,
-    onLongClick: () -> Unit
+    totalOtherMembers: Int = 1,
+    onLongClick: () -> Unit,
+    onDeliveryStatusClick: () -> Unit
 ) {
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
     val timeStr = remember(message.timestamp) { timeFormat.format(Date(message.timestamp)) }
@@ -400,9 +418,9 @@ private fun GroupMessageBubble(
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .width(2.dp)
-                                    .height(24.dp)
-                                    .background(GhostTheme.PurpleLight)
+                                .width(2.dp)
+                                .height(24.dp)
+                                .background(GhostTheme.PurpleLight)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Column {
@@ -444,16 +462,39 @@ private fun GroupMessageBubble(
                         )
 
                         if (isOutgoing) {
+                            val deliveredCount = remember(message.deliveredMemberIdsJson) {
+                                try {
+                                    JSONArray(message.deliveredMemberIdsJson).length()
+                                } catch (_: Exception) {
+                                    0
+                                }
+                            }
                             Spacer(modifier = Modifier.width(4.dp))
-                            when (message.status) {
-                                GroupMessageEntity.STATUS_PENDING -> {
+                            when {
+                                message.status == GroupMessageEntity.STATUS_PENDING -> {
                                     Text(
                                         text = "•",
                                         color = GhostTheme.TextMuted,
                                         fontSize = 12.sp
                                     )
                                 }
-                                GroupMessageEntity.STATUS_SPRAYED -> {
+                                deliveredCount >= totalOtherMembers && totalOtherMembers > 0 -> {
+                                    Icon(
+                                        Icons.Default.DoneAll,
+                                        contentDescription = "Delivered to all",
+                                        tint = GhostTheme.PurpleLight,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                }
+                                deliveredCount > 0 -> {
+                                    Icon(
+                                        Icons.Default.Done,
+                                        contentDescription = "Delivered to $deliveredCount",
+                                        tint = GhostTheme.PurpleLight,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                }
+                                message.status == GroupMessageEntity.STATUS_SPRAYED -> {
                                     Text(
                                         text = "MESH",
                                         color = GhostTheme.PurpleLight,
@@ -462,15 +503,15 @@ private fun GroupMessageBubble(
                                         fontSize = 9.sp
                                     )
                                 }
-                                GroupMessageEntity.STATUS_DELIVERED, GroupMessageEntity.STATUS_SENT -> {
+                                message.status == GroupMessageEntity.STATUS_SENT -> {
                                     Icon(
-                                        Icons.Default.DoneAll,
-                                        contentDescription = "Delivered",
-                                        tint = GhostTheme.SentCheck,
+                                        Icons.Default.Done,
+                                        contentDescription = "Sent",
+                                        tint = GhostTheme.TextMuted,
                                         modifier = Modifier.size(12.dp)
                                     )
                                 }
-                                GroupMessageEntity.STATUS_FAILED -> {
+                                message.status == GroupMessageEntity.STATUS_FAILED -> {
                                     Text(
                                         text = "!",
                                         color = GhostTheme.Failed,
@@ -479,6 +520,165 @@ private fun GroupMessageBubble(
                                         fontSize = 11.sp
                                     )
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Delivery count text row below outgoing bubble (tap to inspect member status)
+        if (isOutgoing) {
+            val deliveredCount = remember(message.deliveredMemberIdsJson) {
+                try {
+                    JSONArray(message.deliveredMemberIdsJson).length()
+                } catch (_: Exception) {
+                    0
+                }
+            }
+            val statusText = when {
+                message.status == GroupMessageEntity.STATUS_SPRAYED && deliveredCount == 0 -> "Spraying to mesh..."
+                deliveredCount == 0 -> "Sent"
+                deliveredCount < totalOtherMembers -> "Delivered to $deliveredCount/$totalOtherMembers"
+                else -> "Delivered to all members"
+            }
+            Text(
+                text = statusText,
+                fontSize = 10.sp,
+                color = if (deliveredCount > 0) GhostTheme.PurpleLight else GhostTheme.TextMuted,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .padding(end = 4.dp, top = 2.dp)
+                    .clickable {
+                        onDeliveryStatusClick()
+                    }
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GroupDeliveryDetailSheet(
+    message: GroupMessageEntity,
+    group: GroupEntity?,
+    contactsMap: Map<String, Contact>,
+    onDismiss: () -> Unit
+) {
+    val myContactId = remember { IdentityManager.getContactId() }
+    val memberIds = remember(group) {
+        try {
+            val arr = JSONArray(group?.memberContactIdsJson ?: "[]")
+            List(arr.length()) { arr.getString(it) }.filter { it != myContactId }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    val deliveredIds = remember(message.deliveredMemberIdsJson) {
+        try {
+            val arr = JSONArray(message.deliveredMemberIdsJson)
+            List(arr.length()) { arr.getString(it) }.toSet()
+        } catch (_: Exception) {
+            emptySet()
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = GhostTheme.SurfaceOverlay,
+        dragHandle = { BottomSheetDefaults.DragHandle(color = GhostTheme.Surface3) }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = GhostTheme.SpaceMd)
+                .padding(bottom = GhostTheme.SpaceLg)
+        ) {
+            Text(
+                text = "DELIVERY STATUS",
+                color = GhostTheme.PurpleLight,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp,
+                letterSpacing = 1.sp
+            )
+            Text(
+                text = "Delivered to ${deliveredIds.size} of ${memberIds.size} members",
+                color = GhostTheme.TextMuted,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp
+            )
+
+            Spacer(modifier = Modifier.height(GhostTheme.SpaceMd))
+
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 240.dp)
+            ) {
+                items(memberIds, key = { it }) { memberId ->
+                    val memberName = contactsMap[memberId]?.name ?: "Peer ${memberId.take(4)}"
+                    val isDelivered = deliveredIds.contains(memberId)
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = GhostTheme.SpaceXs)
+                            .clip(RoundedCornerShape(GhostTheme.RadiusCard))
+                            .background(GhostTheme.Surface1)
+                            .padding(horizontal = GhostTheme.SpaceSm, vertical = GhostTheme.SpaceSm),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        HexagonAvatar(name = memberName, size = 32.dp)
+                        Spacer(modifier = Modifier.width(GhostTheme.SpaceSm))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = memberName,
+                                color = GhostTheme.TextPrimary,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp
+                            )
+                            Text(
+                                text = "ID: ${memberId.take(8)}",
+                                color = GhostTheme.TextMuted,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp
+                            )
+                        }
+
+                        if (isDelivered) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "DELIVERED",
+                                    color = GhostTheme.PurpleLight,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.sp
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(
+                                    Icons.Default.Done,
+                                    contentDescription = "Delivered",
+                                    tint = GhostTheme.PurpleLight,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        } else {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "PENDING",
+                                    color = GhostTheme.TextMuted,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "○",
+                                    color = GhostTheme.TextMuted,
+                                    fontSize = 12.sp
+                                )
                             }
                         }
                     }

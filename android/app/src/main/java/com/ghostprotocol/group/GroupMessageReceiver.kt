@@ -9,6 +9,8 @@ import com.ghostprotocol.data.ContactDao
 import com.ghostprotocol.data.GroupDao
 import com.ghostprotocol.data.GroupMessageDao
 import com.ghostprotocol.data.GroupMessageEntity
+import com.ghostprotocol.receipt.DeliveryReceiptHandler
+import com.ghostprotocol.receipt.DeliveryReceiptProtocol
 import com.ghostprotocol.util.NotificationHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -19,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Handles incoming Cell Group messages (Opcode 0x30).
  * Validates group membership, verifies Ed25519 signature, decrypts envelope with X25519,
- * deduplicates, saves to Room, and shows batched notification.
+ * deduplicates, saves to Room, fires delivery receipt (Opcode 0x40), and shows batched notification.
  */
 class GroupMessageReceiver(
     private val context: Context,
@@ -27,7 +29,8 @@ class GroupMessageReceiver(
     private val contactDao: ContactDao,
     private val groupMessageDao: GroupMessageDao,
     private val scope: CoroutineScope,
-    private val sharedSignatureCache: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
+    private val sharedSignatureCache: ConcurrentHashMap<String, Long> = ConcurrentHashMap(),
+    private val deliveryReceiptHandler: DeliveryReceiptHandler? = null
 ) {
     companion object {
         private const val TAG = "GHOST_GROUP"
@@ -118,7 +121,18 @@ class GroupMessageReceiver(
                     text = rawText
                 }
 
-                // 8. Insert into group_messages table with STATUS_DELIVERED
+                // 8. Compute contentHash and check for first delivery
+                val contentHash = DeliveryReceiptProtocol.computeMessageHash(
+                    senderContactId = senderContactId,
+                    timestamp = envelope.timestamp,
+                    plaintext = text
+                )
+                val existing = groupMessageDao.getByContentHash(contentHash)
+                if (existing != null) {
+                    Log.d(TAG, "Dropping duplicate group message (contentHash match) in '${group.name}'")
+                    return@launch
+                }
+
                 val message = GroupMessageEntity(
                     groupId = groupIdHex,
                     senderContactId = senderContactId,
@@ -126,21 +140,27 @@ class GroupMessageReceiver(
                     timestamp = envelope.timestamp,
                     status = GroupMessageEntity.STATUS_DELIVERED,
                     replyToSender = replySender,
-                    replyToText = replyText
+                    replyToText = replyText,
+                    contentHash = contentHash
                 )
-                groupMessageDao.insert(message)
-                Log.d(TAG, "Decrypted and saved group message in '${group.name}' from '${parsedSenderName ?: sender.name}'")
+                val newId = groupMessageDao.insert(message)
+                if (newId > 0) {
+                    Log.d(TAG, "Decrypted and saved group message in '${group.name}' from '${parsedSenderName ?: sender.name}'")
 
-                // 9. Show batched notification with unread count
-                val unreadCount = groupMessageDao.getUnreadCountForGroup(groupIdHex)
-                NotificationHelper.showGroupMessageNotification(
-                    context = context,
-                    groupName = group.name,
-                    senderName = parsedSenderName ?: sender.name,
-                    preview = text.take(40),
-                    groupId = groupIdHex,
-                    unreadCount = unreadCount
-                )
+                    // Fire delivery receipt back to original sender (first delivery only)
+                    deliveryReceiptHandler?.sendReceipt(envelope.senderContactId, contentHash)
+
+                    // 9. Show batched notification with unread count
+                    val unreadCount = groupMessageDao.getUnreadCountForGroup(groupIdHex)
+                    NotificationHelper.showGroupMessageNotification(
+                        context = context,
+                        groupName = group.name,
+                        senderName = parsedSenderName ?: sender.name,
+                        preview = text.take(40),
+                        groupId = groupIdHex,
+                        unreadCount = unreadCount
+                    )
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to process group message: ${e.message}", e)
             }
