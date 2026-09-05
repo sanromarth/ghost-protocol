@@ -1,4 +1,5 @@
 # GHOST Economy Layer RFC (Layer 6)
+**Author:** PEDDI SANKARA RAO
 **Go package:** `ghost-economy`
 
 ## 1. Purpose
@@ -100,7 +101,7 @@ def compute_reputation(graph):
     d = 0.85
     N = len(graph.nodes)
     scores = {node: 1.0 / N for node in graph.nodes}
-    
+
     for _ in range(MAX_ITERATIONS):
         new_scores = {}
         for node in graph.nodes:
@@ -109,7 +110,7 @@ def compute_reputation(graph):
                 weight = neighbor.successful_forwards / neighbor.total_encounters
                 sum_incoming += (scores[neighbor.id] * weight) / len(graph.outgoing_edges(neighbor))
             new_scores[node] = (1 - d) / N + d * sum_incoming
-            
+
         if converged(scores, new_scores):
             break
         scores = new_scores

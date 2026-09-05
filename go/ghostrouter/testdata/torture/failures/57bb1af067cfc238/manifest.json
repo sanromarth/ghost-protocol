@@ -1,0 +1,132 @@
+{
+  "campaign_seed": 123456789,
+  "scenario_index": 6192,
+  "derived_seed": 3219775004600858635,
+  "configuration": {
+    "campaign_seed": 123456789,
+    "scenario_index": 6192,
+    "derived_seed": 3219775004600858635,
+    "name": "chaos_6192_minimized",
+    "category": "chaos",
+    "topology": "sparse",
+    "nodes": [
+      "chaos_0",
+      "chaos_1",
+      "chaos_2",
+      "chaos_3"
+    ],
+    "initial_links": [
+      [
+        "chaos_1",
+        "chaos_2"
+      ],
+      [
+        "chaos_2",
+        "chaos_3"
+      ]
+    ],
+    "events": [
+      {
+        "type": "restart",
+        "source": "chaos_2"
+      },
+      {
+        "type": "crash",
+        "source": "chaos_3"
+      },
+      {
+        "type": "set_battery",
+        "source": "chaos_1",
+        "battery": 47
+      },
+      {
+        "type": "exchange_all"
+      },
+      {
+        "type": "contact_up",
+        "source": "chaos_1",
+        "dest": "chaos_0"
+      },
+      {
+        "type": "exchange_all"
+      },
+      {
+        "type": "contact_up",
+        "source": "chaos_1",
+        "dest": "chaos_3"
+      },
+      {
+        "type": "crash",
+        "source": "chaos_3"
+      },
+      {
+        "type": "set_battery",
+        "source": "chaos_0",
+        "battery": 48
+      },
+      {
+        "type": "crash",
+        "source": "chaos_2"
+      },
+      {
+        "type": "exchange_all"
+      },
+      {
+        "type": "crash",
+        "source": "chaos_2"
+      },
+      {
+        "type": "send_message",
+        "source": "chaos_0",
+        "dest": "chaos_3",
+        "payload": "Y2hhb3NfZGF0YV82MTkyXzEz"
+      },
+      {
+        "type": "restart",
+        "source": "chaos_0"
+      },
+      {
+        "type": "restart",
+        "source": "chaos_2"
+      },
+      {
+        "type": "set_battery",
+        "source": "chaos_1",
+        "battery": 90
+      },
+      {
+        "type": "exchange_all"
+      },
+      {
+        "type": "advance_time",
+        "duration": 224000000000
+      },
+      {
+        "type": "crash",
+        "source": "chaos_1"
+      },
+      {
+        "type": "advance_time",
+        "duration": 181000000000
+      },
+      {
+        "type": "set_battery",
+        "source": "chaos_2",
+        "battery": 12
+      }
+    ]
+  },
+  "violation": {
+    "id": "I7_RelayGating",
+    "message": "Low battery node (12%) stored transit relay message",
+    "node": "chaos_2",
+    "message_id": "296944bd"
+  },
+  "severity": "P3",
+  "signature": "57bb1af067cfc238",
+  "reproduction_cmd": "ghost-sim replay --seed 3219775004600858635",
+  "original_nodes": 4,
+  "minimized_nodes": 4,
+  "original_events": 25,
+  "minimized_events": 21
+}

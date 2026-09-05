@@ -45,8 +45,9 @@ func (bl *BlobList) Get(i int) []byte {
 
 // SendResult holds the result of SendMessage for gomobile compatibility.
 type SendResult struct {
-	Blob   []byte // encoded message to send, or nil if queued
-	Status string // "direct" or "queued"
+	Blob      []byte // encoded message to send, or nil if queued
+	Status    string // "direct" or "queued"
+	MessageID []byte // generated message ID
 }
 
 // DeliverHandler is the gomobile-compatible callback interface.
@@ -62,8 +63,8 @@ type Router struct {
 
 	handler DeliverHandler
 
-	// In-memory dedup for delivered messages (prevents BLE GATT retry duplicates)
-	deliveredIDs map[string]bool
+	// In-memory bounded dedup for delivered messages (prevents BLE GATT retry duplicates)
+	deliveredDedup *DedupCache
 
 	// relayWillingness controls whether this node accepts forwarded messages
 	// for relay. 0.0 = drop all forwarded messages (leaf node / low battery),
@@ -72,10 +73,57 @@ type Router struct {
 	// the Spray-and-Wait binary split logic remains untouched.
 	relayWillingness float32
 
+	// deliveryAttempts tracks how many times a message has been queued for direct delivery
+	deliveryAttempts map[string]int
+
+	timeNow func() time.Time
+
+	// onAfterPersistDeliverHook is a test seam to inject crashes immediately after
+	// durable persistence of delivered state but before invoking the application callback.
+	onAfterPersistDeliverHook func(msgID []byte)
+
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 	mu       sync.Mutex
+}
+
+// SetAfterPersistDeliverHook installs a test-only callback called immediately after persisting delivery.
+func (r *Router) SetAfterPersistDeliverHook(fn func(msgID []byte)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onAfterPersistDeliverHook = fn
+}
+
+// SetTimeProvider overrides wall-clock time for deterministic testing and simulation.
+func (r *Router) SetTimeProvider(fn func() time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.timeNow = fn
+	if r.store != nil {
+		r.store.SetTimeProvider(fn)
+	}
+}
+
+func (r *Router) now() time.Time {
+	if r.timeNow != nil {
+		return r.timeNow()
+	}
+	return time.Now()
+}
+
+// RunJanitor manually triggers message expiration and storage pruning.
+func (r *Router) RunJanitor() (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	deleted, err := r.store.DeleteExpired(r.now().Unix())
+	if err != nil {
+		return 0, err
+	}
+	if err := r.store.PruneIfNeeded(); err != nil {
+		return deleted, err
+	}
+	return deleted, nil
 }
 
 // NewRouter creates a router. Called once from Kotlin on app startup.
@@ -90,12 +138,15 @@ func NewRouter(localID []byte, dbPath string) (*Router, error) {
 	id := make([]byte, len(localID))
 	copy(id, localID)
 
+	store.SetLocalID(id)
+
 	log.Printf("GHOST_ROUTE: NewRouter localID=%x (len=%d)", id[:min(8, len(id))], len(id))
 
 	return &Router{
 		store:            store,
 		localID:          id,
-		deliveredIDs:     make(map[string]bool),
+		deliveredDedup:   NewDedupCache(2048, DefaultTTLSeconds),
+		deliveryAttempts: make(map[string]int),
 		relayWillingness: 1.0, // Default: full relay participation
 		stopCh:           make(chan struct{}),
 	}, nil
@@ -143,7 +194,7 @@ func (r *Router) Start() {
 		for {
 			select {
 			case <-ticker.C:
-				deleted, err := r.store.DeleteExpired(time.Now().Unix())
+				deleted, err := r.store.DeleteExpired(r.now().Unix())
 				if err != nil {
 					log.Printf("GHOST_ROUTE: expiry janitor error: %v", err)
 				} else if deleted > 0 {
@@ -167,7 +218,7 @@ func (r *Router) Start() {
 		for {
 			select {
 			case <-ticker.C:
-				cutoff := time.Now().Add(-24 * time.Hour).UnixMilli()
+				cutoff := r.now().Add(-24 * time.Hour).UnixMilli()
 				deleted, err := r.store.DeleteStalePeers(cutoff)
 				if err != nil {
 					log.Printf("GHOST_ROUTE: stale peer cleaner error: %v", err)
@@ -223,7 +274,7 @@ func (r *Router) SendMessage(dst []byte, payload []byte) *SendResult {
 	payloadCopy := make([]byte, len(payload))
 	copy(payloadCopy, payload)
 
-	now := time.Now().Unix()
+	now := r.now().Unix()
 	msgID := computeMessageID(r.localID, dstCopy, payloadCopy, now)
 
 	msg := &Message{
@@ -252,12 +303,12 @@ func (r *Router) SendMessage(dst []byte, payload []byte) *SendResult {
 			// Mark as delivered so it's not re-sprayed
 			r.store.UpdateMessageStatus(msg.ID, StatusDelivered)
 			log.Printf("GHOST_ROUTE: SendMessage direct to %x (%d bytes)", shortHex(dst), len(encoded))
-			return &SendResult{Blob: encoded, Status: "direct"}
+			return &SendResult{Blob: encoded, Status: "direct", MessageID: msgID}
 		}
 	}
 
 	log.Printf("GHOST_ROUTE: SendMessage queued for spray to %x", shortHex(dst))
-	return &SendResult{Status: "queued"}
+	return &SendResult{Status: "queued", MessageID: msgID}
 }
 
 // OnPeerDiscovered is called by Kotlin every time BLE discovers a peer.
@@ -279,7 +330,7 @@ func (r *Router) OnPeerDiscovered(peerID []byte, rssi int) *BlobList {
 
 	peer := &PeerInfo{
 		ID:             pid,
-		LastSeen:       time.Now().UnixMilli(),
+		LastSeen:       r.now().UnixMilli(),
 		LastRSSI:       rssi,
 		EncounterCount: encounterCount,
 	}
@@ -295,11 +346,20 @@ func (r *Router) OnPeerDiscovered(peerID []byte, rssi int) *BlobList {
 		log.Printf("GHOST_ROUTE: error getting messages for dst: %v", err)
 	}
 	for _, msg := range dstMsgs {
+		// When relay willingness is <= 0 (battery critical / leaf mode), do not deliver transit messages
+		if r.relayWillingness <= 0 && !bytes.Equal(msg.Src, r.localID) {
+			continue
+		}
+
+		msgKey := fmt.Sprintf("%x", msg.ID)
+		r.deliveryAttempts[msgKey]++
 		encoded := EncodeMessage(msg)
 		blobs = append(blobs, encoded)
-		r.store.UpdateMessageStatus(msg.ID, StatusDelivered)
-		log.Printf("GHOST_ROUTE: delivering msg %x to final dst %x (%d bytes)",
-			shortHex(msg.ID), shortHex(pid), len(encoded))
+		if r.deliveryAttempts[msgKey] >= 3 {
+			r.store.UpdateMessageStatus(msg.ID, StatusDelivered)
+		}
+		log.Printf("GHOST_ROUTE: delivering msg %x to final dst %x (%d bytes, attempt %d)",
+			shortHex(msg.ID), shortHex(pid), len(encoded), r.deliveryAttempts[msgKey])
 	}
 
 	// 3. Spray copies for messages not destined for this peer
@@ -308,6 +368,11 @@ func (r *Router) OnPeerDiscovered(peerID []byte, rssi int) *BlobList {
 		log.Printf("GHOST_ROUTE: error getting pending messages: %v", err)
 	}
 	for _, msg := range pendingMsgs {
+		// Policy gate: critically depleted node (relay willingness <= 0) must never spray transit relay messages
+		if r.relayWillingness <= 0 && !bytes.Equal(msg.Src, r.localID) {
+			continue
+		}
+
 		if bytes.Equal(msg.Dst, pid) {
 			continue
 		}
@@ -318,7 +383,7 @@ func (r *Router) OnPeerDiscovered(peerID []byte, rssi int) *BlobList {
 		if msg.CopiesRemaining <= 1 || msg.HopCount >= MaxHops {
 			continue
 		}
-		if msg.CreatedAt+msg.TTLSeconds < time.Now().Unix() {
+		if msg.CreatedAt+msg.TTLSeconds < r.now().Unix() {
 			continue
 		}
 
@@ -382,7 +447,8 @@ func (r *Router) OnMessageReceived(data []byte) string {
 
 	// Dedup check — must happen BEFORE deliver to prevent BLE GATT retry duplicates
 	msgIDKey := fmt.Sprintf("%x", header.MessageID)
-	if r.deliveredIDs[msgIDKey] {
+	nowUnix := r.now().Unix()
+	if r.deliveredDedup.Seen(msgIDKey, nowUnix) {
 		log.Printf("GHOST_ROUTE: dropping msg %x: already delivered (dedup)", shortHex(header.MessageID))
 		return "dropped: duplicate"
 	}
@@ -397,10 +463,32 @@ func (r *Router) OnMessageReceived(data []byte) string {
 		log.Printf("GHOST_ROUTE: message %x is for us! Delivering %d bytes payload",
 			shortHex(header.MessageID), len(payload))
 
-		r.deliveredIDs[msgIDKey] = true
+		// Step 1: Durably record delivered message state BEFORE invoking application callback
+		deliveredMsg := &Message{
+			ID:              header.MessageID,
+			Src:             header.Src,
+			Dst:             header.Dst,
+			Payload:         payload,
+			CopiesRemaining: 0,
+			TTLSeconds:      header.TTLSeconds,
+			HopCount:        header.HopCount,
+			CreatedAt:       header.CreatedAt,
+			Status:          StatusDelivered,
+		}
+		if err := r.store.SaveMessage(deliveredMsg); err != nil {
+			log.Printf("GHOST_ROUTE: error persisting delivered message %x: %v", shortHex(header.MessageID), err)
+			return fmt.Sprintf("error: failed to persist delivered message: %v", err)
+		}
 
-		// Copy handler ref and release lock BEFORE invoking callback
-		// to prevent deadlock if callback calls Router methods
+		// Step 2: Update in-memory dedup cache
+		r.deliveredDedup.Add(msgIDKey, nowUnix)
+
+		// Test seam hook for crash consistency testing
+		if r.onAfterPersistDeliverHook != nil {
+			r.onAfterPersistDeliverHook(header.MessageID)
+		}
+
+		// Step 3: Invoke callback
 		handler := r.handler
 		r.mu.Unlock()
 		if handler != nil {
@@ -423,7 +511,7 @@ func (r *Router) OnMessageReceived(data []byte) string {
 	}
 
 	// Check TTL
-	if header.CreatedAt+header.TTLSeconds < time.Now().Unix() {
+	if header.CreatedAt+header.TTLSeconds < r.now().Unix() {
 		log.Printf("GHOST_ROUTE: dropping msg %x: TTL expired", shortHex(header.MessageID))
 		return "dropped: TTL expired"
 	}
@@ -481,4 +569,36 @@ func (r *Router) GetStats() string {
 
 	data, _ := json.Marshal(stats)
 	return string(data)
+}
+
+// MarkDelivered marks a message as delivered in BoltDB store.
+// Callable by Kotlin or test harness upon confirmed BLE GATT delivery.
+func (r *Router) MarkDelivered(msgID []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_ = r.store.UpdateMessageStatus(msgID, StatusDelivered)
+}
+
+// LocalID returns a copy of the router's local node ID.
+func (r *Router) LocalID() []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cp := make([]byte, len(r.localID))
+	copy(cp, r.localID)
+	return cp
+}
+
+// MessageCount returns the number of messages currently in transit/storage.
+func (r *Router) MessageCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.store == nil {
+		return 0
+	}
+	return r.store.MessageCount()
+}
+
+// GetStore returns the underlying MessageStore (useful for testing and simulation).
+func (r *Router) GetStore() *MessageStore {
+	return r.store
 }

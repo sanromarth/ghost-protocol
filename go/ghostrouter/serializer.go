@@ -42,6 +42,11 @@ type DecodeResult struct {
 	Payload []byte
 }
 
+// DecodeMessage deserializes a wire-format message into routing header and payload.
+func DecodeMessage(data []byte) (*DecodeResult, error) {
+	return decodeMessage(data)
+}
+
 // decodeMessage is the internal implementation (not exported to gomobile).
 func decodeMessage(data []byte) (*DecodeResult, error) {
 	if len(data) < 4 {

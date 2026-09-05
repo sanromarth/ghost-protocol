@@ -1,4 +1,5 @@
 # GHOST Privacy Layer RFC (Layer 2)
+**Author:** PEDDI SANKARA RAO
 **Rust crate:** `ghost-privacy`
 
 ## 1. Purpose
@@ -55,7 +56,7 @@ pub struct MorphingConfig {
 ```
 
 ## 4. Beacon Morphing Rules
-Traffic must exactly mimic the format, timing, and advertising patterns of commercial BLE beacons. 
+Traffic must exactly mimic the format, timing, and advertising patterns of commercial BLE beacons.
 *   **AirPods:** Must include standard Apple continuity protocol headers and rotate MAC addresses synchronously.
 *   **Eddystone:** Must mimic valid URL or UID frame formats.
 *   **Rotation Schedule:** Morphing profile rotates every 15-45 minutes to prevent long-term fingerprinting.
@@ -64,13 +65,13 @@ Traffic must exactly mimic the format, timing, and advertising patterns of comme
 Chaff generation operates as a Poisson process with λ=0.5 packets/second. Chaff packets are cryptographically indistinguishable from real traffic from the outside. However, they decrypt into innocuous JSON content (e.g., weather updates, time syncs) to provide plausible deniability if the key is coerced.
 
 ## 6. Traffic Shaping Algorithm
-The shaper ensures a constant-rate transmission regardless of actual data availability. 
+The shaper ensures a constant-rate transmission regardless of actual data availability.
 *   Uses Poisson timing intervals to avoid rigidly rhythmic signatures.
 *   Bursts of actual data are smoothed over time.
 *   Features an adaptive rate: listens to local beacon density and blends into the existing noise floor without saturating the channel.
 
 ## 7. Steganographic Encoding
-Payload bytes are dispersed steganographically. The 448-byte payload is woven into fields that ordinarily contain varying telemetry or diagnostic data in plausible beacons. 
+Payload bytes are dispersed steganographically. The 448-byte payload is woven into fields that ordinarily contain varying telemetry or diagnostic data in plausible beacons.
 
 ## 8. Security Model
 **Threat:** Traffic analysis, timing correlation, volume analysis, and machine-learning based fingerprinting.

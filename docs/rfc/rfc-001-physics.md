@@ -1,4 +1,5 @@
 # GHOST Physics Layer RFC (Layer 1)
+**Author:** PEDDI SANKARA RAO
 **Rust crate:** `ghost-physics`
 
 ## 1. Purpose

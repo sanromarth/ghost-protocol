@@ -221,9 +221,9 @@ fun QRScanScreen(navController: NavController) {
                                                                         val myEd25519PubKey = com.ghostprotocol.IdentityManager.getEd25519PubKey()
                                                                         val wireText = if (alreadyReceivedVerification) "$myName\u0000* mutual verification with $myName *" else "$myName\u0000* verified $myName *"
                                                                         val plaintextBytes = wireText.toByteArray(Charsets.UTF_8)
-                                                                        val payload = myEd25519PubKey + plaintextBytes
-                                                                        val signature = com.ghostprotocol.crypto.GhostCrypto.sign(com.ghostprotocol.IdentityManager.getEd25519Seed(), payload)
-                                                                        val ciphertext = com.ghostprotocol.crypto.GhostCrypto.encrypt(x25519Pub, payload + signature)
+                                                                        val handshakePayload = myEd25519PubKey + plaintextBytes
+                                                                        val signature = com.ghostprotocol.crypto.GhostCrypto.sign(com.ghostprotocol.IdentityManager.getEd25519Seed(), handshakePayload)
+                                                                        val ciphertext = com.ghostprotocol.crypto.GhostCrypto.encrypt(x25519Pub, handshakePayload + signature)
 
                                                                         val targetAddress = contact.bleAddress ?: run {
                                                                             val fp = MessageDigest.getInstance("SHA-256").digest(ed25519Pub).copyOfRange(0, 4)
@@ -231,6 +231,14 @@ fun QRScanScreen(navController: NavController) {
                                                                         }
                                                                         if (targetAddress != null) {
                                                                             com.ghostprotocol.ble.BleManager.sendMessage(targetAddress, ciphertext) {}
+                                                                        } else {
+                                                                            val fp = MessageDigest.getInstance("SHA-256").digest(ed25519Pub).copyOfRange(0, 4)
+                                                                            com.ghostprotocol.GhostService.pendingOutboundVerifications[id] = com.ghostprotocol.GhostService.PendingVerification(
+                                                                                contactId = id,
+                                                                                contactEd25519PubFp = fp,
+                                                                                ciphertext = ciphertext
+                                                                            )
+                                                                            android.util.Log.d("QRScanScreen", "Peer $name not yet visible in BLE; queued pending verification")
                                                                         }
                                                                     } catch (e: Exception) {
                                                                         e.printStackTrace()

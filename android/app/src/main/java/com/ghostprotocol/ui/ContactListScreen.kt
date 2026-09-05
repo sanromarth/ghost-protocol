@@ -1,18 +1,18 @@
 package com.ghostprotocol.ui
 
 import android.app.Application
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.util.Base64
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -22,80 +22,75 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
-import com.ghostprotocol.data.Contact
-import com.ghostprotocol.data.GhostDatabase
-import com.ghostprotocol.data.GroupEntity
-import com.ghostprotocol.data.MessageEntity
+import com.ghostprotocol.GhostService
 import com.ghostprotocol.ble.BleManager
-import kotlinx.coroutines.flow.StateFlow
+import com.ghostprotocol.data.ConversationItem
+import com.ghostprotocol.data.ConversationRepository
+import com.ghostprotocol.data.GroupMessageEntity
+import com.ghostprotocol.data.MessageEntity
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.combine
-
-data class ContactWithPreview(
-    val contact: Contact,
-    val lastMessage: String? = null,
-    val lastMessageTime: Long = 0,
-    val unreadCount: Int = 0
-)
+import java.text.SimpleDateFormat
+import java.util.*
 
 class ContactListViewModel(application: Application) : AndroidViewModel(application) {
-    private val db = GhostDatabase.getInstance(application)
-    private val contactDao = db.contactDao()
-    private val messageDao = db.messageDao()
-    private val groupDao = db.groupDao()
+    private val repo = ConversationRepository.getInstance(application)
 
-    val contacts: StateFlow<List<Contact>> = contactDao.getAll()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    val activeGroups: StateFlow<List<GroupEntity>> = groupDao.getAllActive()
+    val conversations: StateFlow<List<ConversationItem>> = repo.getConversations()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ContactListScreen(navController: NavController, viewModel: ContactListViewModel = viewModel()) {
-    val contacts by viewModel.contacts.collectAsStateWithLifecycle(initialValue = emptyList())
-    val activeGroups by viewModel.activeGroups.collectAsStateWithLifecycle(initialValue = emptyList())
+fun ContactListScreen(
+    navController: NavController,
+    viewModel: ContactListViewModel = viewModel()
+) {
+    val conversations by viewModel.conversations.collectAsStateWithLifecycle(initialValue = emptyList())
     val blePeers by BleManager.peers.collectAsStateWithLifecycle(initialValue = emptyList())
     var searchQuery by remember { mutableStateOf("") }
-    var currentTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            kotlinx.coroutines.delay(1_000L)
-            currentTime = System.currentTimeMillis()
-        }
-    }
-    val T = GhostTheme
+    var showNewChatSheet by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
-    val currentPowerPolicy by com.ghostprotocol.GhostService.currentPowerPolicy.collectAsStateWithLifecycle()
+    val currentPowerPolicy by GhostService.currentPowerPolicy.collectAsStateWithLifecycle()
     val batteryPercent = remember {
-        val batteryIntent = context.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
-        val level = batteryIntent?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1
-        val scale = batteryIntent?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100) ?: 100
+        val batteryIntent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
         if (scale > 0) (level * 100) / scale else -1
     }
 
+    val filteredConversations = remember(conversations, searchQuery) {
+        if (searchQuery.isBlank()) {
+            conversations
+        } else {
+            conversations.filter {
+                it.name.contains(searchQuery, ignoreCase = true) ||
+                it.id.contains(searchQuery, ignoreCase = true)
+            }
+        }
+    }
+
     Scaffold(
-        containerColor = T.Surface0,
+        containerColor = GhostTheme.Surface0,
         topBar = {
-            Surface(color = T.Surface0) {
+            Surface(color = GhostTheme.Surface0) {
                 Column(
                     modifier = Modifier
                         .statusBarsPadding()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .padding(horizontal = GhostTheme.SpaceMd, vertical = GhostTheme.SpaceSm)
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -104,38 +99,46 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                     ) {
                         Text(
                             "GHOST",
-                            fontSize = 28.sp,
+                            fontSize = 26.sp,
                             fontWeight = FontWeight.Bold,
-                            color = T.TextPrimary,
-                            letterSpacing = 2.sp
+                            color = GhostTheme.TextPrimary,
+                            letterSpacing = 2.sp,
+                            fontFamily = FontFamily.Monospace
                         )
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             // Survival HUD 1-Tap Toggle
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(12.dp))
-                                    .background(if (T.isSurvivalHudEnabled) T.SurvivalPhosphor.copy(alpha = 0.2f) else T.Surface2)
+                                    .background(if (GhostTheme.isSurvivalHudEnabled) GhostTheme.SurvivalPhosphor.copy(alpha = 0.2f) else GhostTheme.Surface2)
                                     .border(
                                         1.dp,
-                                        if (T.isSurvivalHudEnabled) T.SurvivalPhosphor else Color.Transparent,
+                                        if (GhostTheme.isSurvivalHudEnabled) GhostTheme.SurvivalPhosphor else Color.Transparent,
                                         RoundedCornerShape(12.dp)
                                     )
                                     .clickable {
-                                        T.toggleSurvivalHud(context)
+                                        GhostTheme.toggleSurvivalHud(context)
                                     }
                                     .padding(horizontal = 10.dp, vertical = 5.dp)
                             ) {
                                 Text(
-                                    text = if (T.isSurvivalHudEnabled) "⚡ HUD ON" else "⚡ HUD",
-                                    color = if (T.isSurvivalHudEnabled) T.SurvivalPhosphor else T.TextSecondary,
+                                    text = if (GhostTheme.isSurvivalHudEnabled) "⚡ HUD ON" else "⚡ HUD",
+                                    color = if (GhostTheme.isSurvivalHudEnabled) GhostTheme.SurvivalPhosphor else GhostTheme.TextSecondary,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
-                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                    fontFamily = FontFamily.Monospace
                                 )
                             }
-                            Spacer(modifier = Modifier.width(6.dp))
-                            IconButton(onClick = { navController.navigate("settings") }) {
-                                Icon(Icons.Default.Settings, "Settings", tint = T.TextSecondary)
+                            Spacer(modifier = Modifier.width(GhostTheme.SpaceSm))
+                            IconButton(
+                                onClick = { navController.navigate("settings") },
+                                modifier = Modifier.size(GhostTheme.MinTouchTarget)
+                            ) {
+                                Icon(
+                                    Icons.Default.Settings,
+                                    contentDescription = "Settings",
+                                    tint = GhostTheme.TextSecondary
+                                )
                             }
                         }
                     }
@@ -145,35 +148,41 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                         batteryPercent = batteryPercent,
                         powerPolicy = currentPowerPolicy,
                         peerCount = blePeers.size,
-                        onToggle = { T.toggleSurvivalHud(context) }
+                        onToggle = { GhostTheme.toggleSurvivalHud(context) }
                     )
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(GhostTheme.SpaceSm))
 
-                    // Search bar
+                    // Clean Search bar
                     TextField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(T.RadiusInput)),
+                            .clip(RoundedCornerShape(GhostTheme.RadiusInput)),
                         placeholder = {
                             Text(
                                 "Search contacts and cells...",
-                                color = T.TextMuted,
+                                color = GhostTheme.TextMuted,
                                 fontSize = 14.sp
                             )
                         },
-                        leadingIcon = { Icon(Icons.Default.Search, null, tint = T.TextMuted) },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Search,
+                                contentDescription = "Search",
+                                tint = GhostTheme.TextMuted
+                            )
+                        },
                         singleLine = true,
                         colors = TextFieldDefaults.colors(
-                            focusedContainerColor = T.Surface2,
-                            unfocusedContainerColor = T.Surface1,
+                            focusedContainerColor = GhostTheme.Surface2,
+                            unfocusedContainerColor = GhostTheme.Surface1,
                             focusedIndicatorColor = Color.Transparent,
                             unfocusedIndicatorColor = Color.Transparent,
-                            cursorColor = T.Purple,
-                            focusedTextColor = T.TextPrimary,
-                            unfocusedTextColor = T.TextPrimary
+                            cursorColor = GhostTheme.Purple,
+                            focusedTextColor = GhostTheme.TextPrimary,
+                            unfocusedTextColor = GhostTheme.TextPrimary
                         ),
                         textStyle = LocalTextStyle.current.copy(fontSize = 14.sp)
                     )
@@ -181,129 +190,41 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
             }
         },
         floatingActionButton = {
-            Column(
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                horizontalAlignment = Alignment.End
-            ) {
-                // Create Cell Group
-                SmallFloatingActionButton(
-                    onClick = { navController.navigate("group_creation") },
-                    containerColor = T.Purple,
-                    contentColor = Color.White
-                ) {
-                    Text(
-                        "CELL",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 10.sp,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                    )
-                }
-                // Add by Short Code
-                SmallFloatingActionButton(
-                    onClick = { navController.navigate("short_code_input") },
-                    containerColor = T.Surface2,
-                    contentColor = T.TextPrimary
-                ) {
-                    Text("#", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                }
-                // Show My QR
-                SmallFloatingActionButton(
-                    onClick = { navController.navigate("qr_show") },
-                    containerColor = T.Surface2,
-                    contentColor = T.TextPrimary
-                ) {
-                    Icon(Icons.Default.QrCode, contentDescription = "My QR", modifier = Modifier.size(20.dp))
-                }
-                // Scan QR — primary action
-                FloatingActionButton(
-                    onClick = { navController.navigate("qr_scan") },
-                    containerColor = T.Purple,
-                    contentColor = Color.White
-                ) {
-                    Icon(Icons.Default.QrCodeScanner, contentDescription = "Scan QR")
-                }
-            }
+            GhostActionFab(
+                contentDescription = "New Conversation or Cell",
+                onClick = { showNewChatSheet = true }
+            )
         }
     ) { padding ->
-        val filteredContacts = if (searchQuery.isBlank()) contacts else contacts.filter {
-            it.name.contains(searchQuery, ignoreCase = true) ||
-            it.id.contains(searchQuery, ignoreCase = true)
-        }
-        val filteredGroups = if (searchQuery.isBlank()) activeGroups else activeGroups.filter {
-            it.name.contains(searchQuery, ignoreCase = true)
-        }
-
         when {
-            contacts.isEmpty() && activeGroups.isEmpty() -> {
-                // Premium empty state
+            conversations.isEmpty() && searchQuery.isBlank() -> {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(padding)
-                        .background(T.Surface0),
+                        .padding(padding),
                     contentAlignment = Alignment.Center
                 ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.padding(horizontal = 48.dp)
-                    ) {
-                        Text("👻", fontSize = 72.sp)
-                        Spacer(modifier = Modifier.height(T.SpaceLg))
-                        Text(
-                            "Your mesh is empty",
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = T.TextPrimary
-                        )
-                        Spacer(modifier = Modifier.height(T.SpaceSm))
-                        Text(
-                            "Scan a friend's QR code or create a\nCell group to start messaging",
-                            fontSize = 14.sp,
-                            color = T.TextMuted,
-                            textAlign = TextAlign.Center,
-                            lineHeight = 20.sp
-                        )
-                        Spacer(modifier = Modifier.height(T.SpaceLg))
-                        Button(
-                            onClick = { navController.navigate("qr_scan") },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = T.Purple,
-                                contentColor = Color.White
-                            ),
-                            shape = RoundedCornerShape(T.RadiusInput),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(52.dp)
-                        ) {
-                            Text("Scan QR Code", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                        }
-                    }
+                    GhostEmptyState(
+                        icon = Icons.Default.QrCodeScanner,
+                        title = "Your mesh is quiet",
+                        subtitle = "No active conversations. Scan a peer's QR code or create an encrypted Cell Group to begin.",
+                        actionText = "Scan QR Code",
+                        onAction = { navController.navigate("qr_scan") }
+                    )
                 }
             }
-            filteredContacts.isEmpty() && filteredGroups.isEmpty() && searchQuery.isNotBlank() -> {
+            filteredConversations.isEmpty() && searchQuery.isNotBlank() -> {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(padding)
-                        .background(T.Surface0),
+                        .padding(padding),
                     contentAlignment = Alignment.Center
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("🔍", fontSize = 48.sp)
-                        Spacer(modifier = Modifier.height(T.SpaceMd))
-                        Text(
-                            "No contacts or cells found",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = T.TextSecondary
-                        )
-                        Spacer(modifier = Modifier.height(T.SpaceXs))
-                        Text(
-                            "Try a different search term",
-                            fontSize = 13.sp,
-                            color = T.TextMuted
-                        )
-                    }
+                    GhostEmptyState(
+                        icon = Icons.Default.Search,
+                        title = "No conversations found",
+                        subtitle = "No contacts or cells match \"$searchQuery\"."
+                    )
                 }
             }
             else -> {
@@ -311,211 +232,308 @@ fun ContactListScreen(navController: NavController, viewModel: ContactListViewMo
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(padding)
-                        .background(T.Surface0)
+                        .background(GhostTheme.Surface0),
+                    contentPadding = PaddingValues(bottom = 80.dp)
                 ) {
-                    if (filteredGroups.isNotEmpty()) {
-                        item {
-                            Text(
-                                text = "CELLS",
-                                color = T.TextMuted,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                letterSpacing = 1.sp,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                        }
-                        items(filteredGroups, key = { "group_${it.groupId}" }) { group ->
-                            CellGroupRow(
-                                group = group,
-                                onClick = { navController.navigate("group_chat/${group.groupId}") { launchSingleTop = true } }
-                            )
-                        }
-                    }
-
-                    if (filteredContacts.isNotEmpty()) {
-                        if (filteredGroups.isNotEmpty()) {
-                            item {
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = "DIRECT CONTACTS",
-                                    color = T.TextMuted,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                    letterSpacing = 1.sp,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    items(filteredConversations, key = { it.key }) { item ->
+                        when (item) {
+                            is ConversationItem.Direct -> {
+                                DirectConversationRow(
+                                    item = item,
+                                    onClick = {
+                                        navController.navigate("chat/${item.id}") {
+                                            launchSingleTop = true
+                                        }
+                                    }
                                 )
                             }
-                        }
-                        items(filteredContacts, key = { "contact_${it.id}" }) { contact ->
-                            val matchedPeer = blePeers.find { peer ->
-                                val matchesAddress = contact.bleAddress != null && peer.address == contact.bleAddress
-                                val matchesFp = peer.fingerprint != null && try {
-                                    val contactFp = java.security.MessageDigest.getInstance("SHA-256")
-                                        .digest(Base64.decode(contact.ed25519PubKey, Base64.NO_WRAP))
-                                        .copyOfRange(0, 4)
-                                    peer.fingerprint.contentEquals(contactFp)
-                                } catch (_: Exception) { false }
-                                (matchesAddress || matchesFp) && (currentTime - peer.lastSeen < BleManager.PEER_OFFLINE_TIMEOUT_MS)
+                            is ConversationItem.Group -> {
+                                GroupConversationRow(
+                                    item = item,
+                                    onClick = {
+                                        navController.navigate("group_chat/${item.id}") {
+                                            launchSingleTop = true
+                                        }
+                                    }
+                                )
                             }
-                            val isOnline = matchedPeer != null
-                            PremiumContactRow(
-                                contact = contact,
-                                matchedPeer = matchedPeer,
-                                isOnline = isOnline,
-                                onClick = { navController.navigate("chat/${contact.id}") { launchSingleTop = true } }
-                            )
                         }
                     }
                 }
             }
         }
     }
+
+    if (showNewChatSheet) {
+        val sheetState = rememberModalBottomSheetState()
+        NewChatBottomSheet(
+            sheetState = sheetState,
+            onDismiss = { showNewChatSheet = false },
+            onNewCellGroup = {
+                showNewChatSheet = false
+                navController.navigate("group_creation")
+            },
+            onScanQr = {
+                showNewChatSheet = false
+                navController.navigate("qr_scan")
+            },
+            onShowQr = {
+                showNewChatSheet = false
+                navController.navigate("qr_show")
+            },
+            onAddShortCode = {
+                showNewChatSheet = false
+                navController.navigate("short_code_input")
+            }
+        )
+    }
 }
 
 @Composable
-fun CellGroupRow(
-    group: GroupEntity,
+private fun DirectConversationRow(
+    item: ConversationItem.Direct,
     onClick: () -> Unit
 ) {
-    val T = GhostTheme
-    val memberCount = remember(group.memberContactIdsJson) {
+    val ed25519Bytes = remember(item.ed25519PubKeyBase64) {
         try {
-            org.json.JSONArray(group.memberContactIdsJson).length()
+            Base64.decode(item.ed25519PubKeyBase64, Base64.NO_WRAP)
         } catch (_: Exception) {
-            0
+            null
         }
+    }
+    val timeFormatted = remember(item.lastMessageTime) {
+        formatConversationTime(item.lastMessageTime)
     }
 
     Surface(
-        color = T.Surface0,
+        color = GhostTheme.Surface0,
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
     ) {
         Row(
             modifier = Modifier
-                .padding(horizontal = 16.dp, vertical = 10.dp)
-                .fillMaxWidth(),
+                .padding(horizontal = GhostTheme.SpaceMd, vertical = GhostTheme.SpaceSm)
+                .fillMaxWidth()
+                .defaultMinSize(minHeight = GhostTheme.MinTouchTarget),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            HexagonAvatar(name = group.name, size = T.AvatarMedium)
+            GhostAvatar(
+                pubkey = ed25519Bytes,
+                name = item.name,
+                size = GhostTheme.AvatarMedium,
+                isMutuallyVerified = item.isVerified,
+                animateEtherealRing = false
+            )
 
-            Spacer(modifier = Modifier.width(T.SpaceMd))
+            Spacer(modifier = Modifier.width(GhostTheme.SpaceMd))
 
             Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = group.name,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = T.TextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(T.Purple)
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f, fill = false)
                     ) {
                         Text(
-                            text = "CELL",
-                            color = Color.White,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            text = item.name,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = GhostTheme.TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (item.isVerified) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            GhostBadge(
+                                text = "VERIFIED",
+                                containerColor = GhostTheme.Surface2,
+                                contentColor = GhostTheme.PurpleLight
+                            )
+                        } else if (item.isIntroduced) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            GhostBadge(
+                                text = "INTRODUCED",
+                                containerColor = GhostTheme.Surface2,
+                                contentColor = GhostTheme.TextSecondary
+                            )
+                        }
+                    }
+                    if (timeFormatted.isNotBlank()) {
+                        Text(
+                            text = timeFormatted,
+                            fontSize = 11.sp,
+                            color = GhostTheme.TextMuted,
+                            fontFamily = FontFamily.Monospace
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = "$memberCount members · Private mesh cell",
-                    fontSize = 12.sp,
-                    color = T.TextMuted,
-                    maxLines = 1
-                )
+
+                Spacer(modifier = Modifier.height(3.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f, fill = false),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (item.lastMessageIsOutgoing && item.lastMessageStatus != null) {
+                            GhostStatusIndicator(status = item.lastMessageStatus)
+                            Spacer(modifier = Modifier.width(4.dp))
+                        }
+
+                        Text(
+                            text = item.lastMessageText ?: "#${item.id.take(8)}",
+                            fontSize = 13.sp,
+                            color = if (item.lastMessageText != null) GhostTheme.TextSecondary else GhostTheme.TextMuted,
+                            fontFamily = if (item.lastMessageText != null) FontFamily.Default else FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    RadioProximityWave(
+                        rssi = item.directRssi,
+                        isOnline = item.isDirectRadio
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-fun PremiumContactRow(
-    contact: Contact,
-    matchedPeer: com.ghostprotocol.ble.DiscoveredPeer?,
-    isOnline: Boolean,
+private fun GroupConversationRow(
+    item: ConversationItem.Group,
     onClick: () -> Unit
 ) {
-    val T = GhostTheme
-    val ed25519Bytes = remember(contact.ed25519PubKey) {
-        try { Base64.decode(contact.ed25519PubKey, Base64.NO_WRAP) } catch (_: Exception) { null }
+    val timeFormatted = remember(item.lastMessageTime) {
+        formatConversationTime(item.lastMessageTime)
     }
 
-    Row(
+    Surface(
+        color = GhostTheme.Surface0,
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
     ) {
-        // Signature Ghost Avatar with Ethereal Ring (animated violet for verified, slate for unverified)
-        GhostAvatar(
-            pubkey = ed25519Bytes,
-            name = contact.name,
-            size = T.AvatarMedium,
-            isMutuallyVerified = contact.isVerified
-        )
+        Row(
+            modifier = Modifier
+                .padding(horizontal = GhostTheme.SpaceMd, vertical = GhostTheme.SpaceSm)
+                .fillMaxWidth()
+                .defaultMinSize(minHeight = GhostTheme.MinTouchTarget),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            HexagonAvatar(name = item.name, size = GhostTheme.AvatarMedium)
 
-        Spacer(modifier = Modifier.width(14.dp))
+            Spacer(modifier = Modifier.width(GhostTheme.SpaceMd))
 
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = contact.name,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = T.TextPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                if (contact.isIntroduced && !contact.isVerified) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Box(
-                        modifier = Modifier
-                            .border(1.dp, Color(0xFF3F3F46), RoundedCornerShape(4.dp))
-                            .padding(horizontal = 5.dp, vertical = 2.dp)
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f, fill = false)
                     ) {
                         Text(
-                            text = "INTRODUCED",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFA1A1AA),
-                            letterSpacing = 0.5.sp
+                            text = item.name,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = GhostTheme.TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        GhostBadge(
+                            text = "CELL",
+                            containerColor = GhostTheme.Purple,
+                            contentColor = Color.White
+                        )
+                    }
+                    if (timeFormatted.isNotBlank()) {
+                        Text(
+                            text = timeFormatted,
+                            fontSize = 11.sp,
+                            color = GhostTheme.TextMuted,
+                            fontFamily = FontFamily.Monospace
                         )
                     }
                 }
+
+                Spacer(modifier = Modifier.height(3.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f, fill = false),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (item.lastMessageIsOutgoing && item.lastMessageStatus != null) {
+                            GhostStatusIndicator(status = item.lastMessageStatus)
+                            Spacer(modifier = Modifier.width(4.dp))
+                        }
+
+                        val previewText = when {
+                            item.lastMessageText != null -> {
+                                val sender = item.lastMessageSenderName?.let { "$it: " } ?: ""
+                                "$sender${item.lastMessageText}"
+                            }
+                            else -> "${item.memberCount} members · Private mesh cell"
+                        }
+
+                        Text(
+                            text = previewText,
+                            fontSize = 13.sp,
+                            color = if (item.lastMessageText != null) GhostTheme.TextSecondary else GhostTheme.TextMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Text(
+                        text = "MESH",
+                        color = GhostTheme.PurpleLight,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 10.sp
+                    )
+                }
             }
-            Spacer(modifier = Modifier.height(3.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "#${contact.id.take(6)}",
-                    fontSize = 12.sp,
-                    color = T.TextMuted,
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                )
-                // Live Radio RF Proximity Wave
-                RadioProximityWave(
-                    rssi = matchedPeer?.rssi,
-                    isOnline = isOnline
-                )
-            }
+        }
+    }
+}
+
+private fun formatConversationTime(timestamp: Long): String {
+    if (timestamp <= 0L) return ""
+    val now = Calendar.getInstance()
+    val time = Calendar.getInstance().apply { timeInMillis = timestamp }
+    return when {
+        now.get(Calendar.YEAR) == time.get(Calendar.YEAR) &&
+        now.get(Calendar.DAY_OF_YEAR) == time.get(Calendar.DAY_OF_YEAR) -> {
+            SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
+        }
+        now.get(Calendar.YEAR) == time.get(Calendar.YEAR) &&
+        now.get(Calendar.DAY_OF_YEAR) - time.get(Calendar.DAY_OF_YEAR) == 1 -> {
+            "Yesterday"
+        }
+        else -> {
+            SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(timestamp))
         }
     }
 }

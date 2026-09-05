@@ -1,0 +1,77 @@
+{
+  "campaign_seed": 123456789,
+  "scenario_index": 6539,
+  "derived_seed": 6942695338830409470,
+  "configuration": {
+    "campaign_seed": 123456789,
+    "scenario_index": 6539,
+    "derived_seed": 6942695338830409470,
+    "name": "chaos_6539_minimized",
+    "category": "chaos",
+    "topology": "sparse",
+    "nodes": [
+      "chaos_3",
+      "chaos_4",
+      "chaos_5"
+    ],
+    "initial_links": [
+      [
+        "chaos_0",
+        "chaos_1"
+      ],
+      [
+        "chaos_2",
+        "chaos_3"
+      ],
+      [
+        "chaos_3",
+        "chaos_4"
+      ],
+      [
+        "chaos_4",
+        "chaos_5"
+      ],
+      [
+        "chaos_5",
+        "chaos_6"
+      ],
+      [
+        "chaos_1",
+        "chaos_4"
+      ]
+    ],
+    "events": [
+      {
+        "type": "send_message",
+        "source": "chaos_5",
+        "dest": "chaos_5",
+        "payload": "Y2hhb3NfZGF0YV82NTM5XzQ="
+      },
+      {
+        "type": "exchange_all"
+      },
+      {
+        "type": "crash",
+        "source": "chaos_3"
+      },
+      {
+        "type": "set_battery",
+        "source": "chaos_4",
+        "battery": 14
+      }
+    ]
+  },
+  "violation": {
+    "id": "I7_RelayGating",
+    "message": "Low battery node (14%) stored transit relay message",
+    "node": "chaos_4",
+    "message_id": "a04dcf5e"
+  },
+  "severity": "P3",
+  "signature": "c816a327d5867e4e",
+  "reproduction_cmd": "ghost-sim replay --seed 6942695338830409470",
+  "original_nodes": 7,
+  "minimized_nodes": 3,
+  "original_events": 21,
+  "minimized_events": 4
+}

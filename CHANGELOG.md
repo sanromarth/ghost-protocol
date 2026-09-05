@@ -4,6 +4,204 @@ All notable changes to the GHOST Protocol project are documented in this file.
 
 ---
 
+## [v0.4.4] — 2026-09-05
+
+Cross-device reliability and transport framing release resolving low-end Android BLE write failures, ATT MTU negotiation race conditions, group message retransmission cancellations, reciprocal QR verification races, and truthful status tracking.
+
+### Added
+- **Dynamic BLE Transport Framing (`0xFB`, `GattOperationQueue.kt`):**
+  - Added link-layer framing protocol (`OPCODE_BLE_FRAGMENT = 0xFB`) to slice payloads exceeding the connection's negotiated ATT MTU.
+  - 7-byte wire header: `[1B opcode=0xFB][2B transferId][2B fragIndex][2B totalFrags][chunkPayload]`.
+  - Pure slicing function `slicePayload(data, negotiatedMtu)` automatically slices envelopes when `data.size > negotiatedMtu - 3`.
+  - Payloads fitting within the negotiated MTU bypass framing entirely for 100% backward compatibility.
+- **Inbound Fragment Reassembly State Machine (`BleManager.kt`):**
+  - In-memory `ReassemblySession` handling multi-fragment writes per peer MAC.
+  - Bounded to 16 concurrent peer sessions with a 30-second inactivity timeout and 64 KB total transfer ceiling.
+  - Out-of-order and duplicate fragment delivery handled idempotently.
+  - Explicit prohibition against nested `0xFB` frames.
+  - Immediate GATT write response returned for every received chunk.
+  - Clean session teardown on peer disconnect or service shutdown.
+- **Reciprocal QR Verification Queue (`GhostService.kt`, `QRScanScreen.kt`):**
+  - Memory-backed `pendingOutboundVerifications` map caching handshake packets when a QR code is scanned before the peer's BLE advertisement has been observed.
+  - Automatically dispatches queued verification packets once the peer's MAC is discovered.
+  - 5-minute time-to-live with periodic sweep to prevent unbounded memory growth.
+
+### Changed & Fixed
+- **HCI Link Stabilization Delay (`GattOperationQueue.kt`):**
+  - Added mandatory 100ms post-connect delay before calling `requestMtu(512)`.
+  - Prevents immediate HCI timeouts and `GATT 133` disconnect loops on budget Bluetooth chipsets (e.g. MediaTek MT6739, Unisoc SC9863A).
+  - Defaults connection MTU to 23 bytes (20 usable ATT bytes) if negotiation fails or times out.
+- **Scan Burst Decoupling (`GhostService.kt`):**
+  - Replaced `collectLatest` with `collect` on `BleManager.peers` flow.
+  - Decoupled group message retransmissions into detached child coroutine jobs with a 10-second per-group debounce map (`lastGroupReflush`).
+  - BLE scan bursts firing every 100–300ms no longer cancel in-flight Room database queries or active GATT writes.
+- **Truthful Group Message Status Progression (`GroupMessageSender.kt`):**
+  - Messages remain in `STATUS_PENDING` while direct GATT transmission is in flight.
+  - Advances to `STATUS_SENT` only after physical GATT write confirmation from `onCharacteristicWrite`.
+  - Falls back to `STATUS_SPRAYED` if direct unicast fails or peer is unreachable, allowing mesh multi-hop propagation.
+  - Preserved Stage 3 terminal state protections ($U_2, U_{15}$) prohibiting downgrades from `STATUS_DELIVERED`.
+- **Group Envelope Input Sanitization (`GroupMessageReceiver.kt`):**
+  - Base64 payload decoding normalized with `.trim()` and `Base64.DEFAULT` flags to handle trailing newlines and whitespace.
+  - Enforced strict 32-byte Ed25519 public key length validation before signature verification.
+  - Added privacy-safe diagnostic logging (packet length, key fingerprint, sender ID prefix) without leaking message plaintext.
+  - Maintained Ed25519 as authoritative for sender identity; corrupt or mismatched envelopes drop cleanly without silent fallback.
+
+### Verified
+- **Unit Test Suite (`BleReliabilityTest.kt`):**
+  - 11 unit tests covering MTU 23/185/247/512 slicing, unfragmented payload invariance, 16-fragment MTU 23 splits, out-of-order reassembly, duplicate fragment deduplication, and 64 KB boundary guards.
+- **Full Android Test Suite:** 52 / 52 passing tests (`./gradlew testDebugUnitTest`).
+- **Clean APK Build:** `./gradlew assembleDebug` builds cleanly (44.3 MB debug APK).
+
+---
+
+## [v0.4.3] — 2026-09-05
+
+Major release introducing **Stage 4 Android OEM Hell Engine (Hostile Runtime Verification)**. Validates the GHOST Protocol at the boundary of hostile mobile operating system lifecycles, vendor battery management, Bluetooth/GATT instability, background task termination, permission revocation, and native JNI boundaries.
+
+### Added
+- **Android OEM Hostile Runtime Engine (`go/ghostrouter/sim/oem`):**
+  - High-speed, deterministic, discrete-event simulation engine modeling the Android OS boundary.
+  - 10 specialized domain models: Activity lifecycle, `GhostService` foreground service, Linux process lifecycle & LMKD, `BluetoothAdapter` state machine, serialized `GattOperationQueue`, runtime BLE permissions, `PowerPolicyEngine`, Room SQLite disk persistence, Ed25519 identity stability across MAC rotation, and Rust/Go JNI boundaries.
+  - 7 synthetic OEM hostility profiles: `OEM_STOCK` (AOSP/Pixel baseline), `OEM_BACKGROUND_AGGRESSIVE` (strict background freezer), `OEM_BLE_UNSTABLE` (flaky vendor stack & GATT 133), `OEM_MEMORY_PRESSURE` (low RAM & aggressive LMKD), `OEM_BATTERY_AGGRESSIVE` (deep sleep & wake lock suppression), `OEM_SERVICE_HOSTILE` (task-killer / swipe termination), and `OEM_MAXIMUM_HOSTILITY` (full combinatorial stress).
+- **Comprehensive Runtime Invariants ($O_1$ through $O_{24}$):**
+  - Enforces $O_1$ Durable Message Survival, $O_2$ Activity Decoupling, $O_3$ Service Restart Consistency, $O_4$ GATT Queue Serialization ($\le 1$ active connection), $O_5$ Closed GATT Safety, $O_6$ Terminal Delivery Invariance, $O_7$ Bluetooth Off Bounded Abort, $O_8$ Bluetooth On Recovery, $O_9$ MAC Rotation Stability, $O_{10}$ Permission Revocation Safety, $O_{11}$ Permission Restoration Recovery, $O_{12}$ Battery Relay Gating, $O_{13}$ Bounded Queue Depth, $O_{14}$ Bounded Observer Growth, $O_{15}$ Native Boundary Safety, $O_{16}$ Storage Failure Transparency, $O_{17}$ No Logical Duplicates, $O_{18}$ No Committed Message Loss, $O_{19}$ Valid State Progression, $O_{20}$ Deadlock Free Service, $O_{21}$ Exact Deterministic Replay, $O_{22}$ Wire Protocol Invariance, $O_{23}$ Identity Immutability, and $O_{24}$ Eventual Quiescence.
+- **Validation Scope Attribution Framework:**
+  - Distinctly delineates and documents validation boundaries: `MODEL_VALIDATED` (discrete Go runtime engine), `ANDROID_UNIT_VALIDATED` (JVM/Gradle unit test suite), and `PHYSICAL_DEVICE_VALIDATED` (requires physical hardware testing on actual OEM devices).
+  - Explicitly documents the methodological distinction between virtual process restart durability and physical NAND/F2FS reboot durability.
+- **Simulator CLI Integration (`cmd/ghost-sim`):**
+  - Added `ghost-sim oem` subcommand supporting configurable scenario counts, PRNG master seeds, parallel worker pools, JSON output, and automated forensic Markdown report generation.
+  - Integrated 5x deterministic replay verification and physical OEM observation trace import/export bridge.
+
+### Verified
+- **10,000-Scenario Deterministic Campaign:** 10,000 / 10,000 scenarios passed (100.0%) across all 7 OEM profiles ($P0=0, P1=0, P2=0, P3=0, P4=0$).
+- **Concurrency & Race Detection:** Clean pass under Go Race Detector (`-race`) with zero data races.
+- **Replay Determinism:** 5x repeated executions yield bit-for-bit identical state and metric hashes.
+
+---
+
+## [v0.4.2] — 2026-09-05
+
+Milestone release delivering **Stage 3 UX & Application State Torture Hardening**. Stress-tests the complete user-facing application pipeline (`Compose UI -> ChatViewModel -> ConversationRepository -> Room Database -> Go Router / Rust Crypto -> BLE / GATT Stack`) under deterministic adversarial concurrency.
+
+### Added
+- **Deterministic UX / Responsiveness Torture Engine (`go/ghostrouter/sim/ux`):**
+  - Models virtual time, Compose recomposition frame timing, coroutine dispatchers, and StateFlow/SharedFlow collectors.
+  - Formal UX invariants ($U_1$ through $U_{15}$) evaluating UI responsiveness, transport truthfulness, memory leak prevention, and repository consistency.
+  - Delta-debugging scenario minimizer (`shrinker.go`) for automatic test reduction.
+  - Integrated `ghost-sim ux` CLI subcommand.
+
+### Changed & Fixed
+- **Atomic SQLite Status Guard in Room DAOs (`MessageDao.kt`, `GroupMessageDao.kt`):**
+  - Fixed a subtle asynchronous race condition where delayed out-of-order transport events could downgrade a message from `STATUS_DELIVERED` (`2`) back to `STATUS_SENT` (`1`) or `STATUS_PENDING` (`0`).
+  - Added atomic SQL condition: `AND (status != 2 OR :status = 2)`, mathematically guaranteeing terminal delivery invariance.
+  - Added regression test suite `MessageStatusTransitionTest.kt` verifying status immutability.
+- **Generator Causality Audit Fix (`generator.go`):**
+  - Fixed synthetic receipt scheduling to strictly respect physical GATT transmission latencies, eliminating unclassified acausal receipt anomalies.
+
+### Verified
+- **10,000-Scenario UX Campaign:** 10,000 / 10,000 scenarios passed with 0 invariant violations and 0 unclassified acausal receipts.
+
+---
+
+## [v0.4.1] — 2026-09-04
+
+Hardening sprint closing all findings from the **Extreme Mesh Torture Campaign (Stage 1 & Stage 2)**.
+
+### Added
+- **Deterministic Virtual Mesh Simulator & Torture Engine (`go/ghostrouter/sim`, `sim/torture`):**
+  - Discrete-event simulation framework supporting 10 to 1,000+ virtual nodes.
+  - 10-dimensional parameter fuzzing (topology, channel loss, battery drain, churn, TTL boundaries, hop counts, payload sizes).
+  - 15 formal mesh routing invariants ($I_1$ through $I_{15}$) checking conservation of copies, delivery uniqueness, and hop limits.
+  - Integrated `ghost-sim run` and `ghost-sim torture` CLI commands.
+
+### Fixed
+- **Defect A: Persistent Inbound Delivery Deduplication across Reboot (`I6_Dedup`):**
+  - Fixed vulnerability where a destination node rebooting after receiving a message from one carrier would re-deliver the message to the application when encountering a second carrier.
+  - Integrated persistent SQLite deduplication storage ensuring delivery records survive process and node reboots.
+- **Defect B: Relay Gating Failure after Battery Depletion (`I7_RelayGating`):**
+  - Fixed issue where nodes dropping below 20% battery continued to spray pre-existing transit messages during peer discovery.
+  - Enforced dynamic relay willingness checks during neighbor encounter synchronization.
+
+### Verified
+- **100,000-Scenario Extended Campaign:** 100,000 / 100,000 scenarios passed with zero invariant violations ($I_1..I_{15} = 0$, $P_0..P_4 = 0$).
+- **Protocol Invariance:** Zero changes to wire format, opcodes, cryptography, or Spray-and-Wait parameters ($L=4$, $\text{MaxHops}=10$, $\text{TTL}=24\text{h}$).
+
+---
+
+## [v0.4.0] — 2026-09-04
+
+Major release focusing on **Mesh Reliability, Resilience & Production Hardening**. Prior to introducing physical transport extensions, this milestone eliminates Bluetooth Low Energy controller collisions, hardens delay-tolerant routing storage invariants, prevents transit denial-of-service, bounds memory allocations, isolates native cryptographic execution from JVM crashes, and enforces strict battery conservation rules.
+
+### Added
+- **Serialized GATT Operation Queue (`GattOperationQueue.kt`):**
+  - Enforces strictly sequential client GATT connections and characteristic writes across all concurrent coroutines.
+  - Inter-connection cool-off: strictly enforces a 150ms delay between disconnect and reconnect to the same peer MAC address, completely eliminating Android Bluetooth stack `GATT 133` controller collision errors.
+  - Operation timeout: 15-second watchdog timer per queued operation preventing indefinite stack stalls.
+  - Guaranteed resource teardown: ensures `gatt.close()` is invoked in all terminal states (`disconnect`, `onError`, `timeout`, cancellation).
+  - Dual-API characteristic write: adopts Android 13+ (API 33+) `BluetoothGatt.writeCharacteristic(char, data, writeType)` while maintaining fully backward-compatible fallback for Android 8–12 (API 26–32).
+  - Buffer overflow protection: expanded `_incomingMessages` channel buffer to capacity 256 with `BufferOverflow.DROP_OLDEST` to prevent coroutine backpressure stalls under heavy radio bursts.
+- **Go DTN Store Quotas & Eviction Priority (`go/ghostrouter`):**
+  - **Destination Quota:** Enforces a maximum cap of 50 transit relay messages per destination node in `SaveMessage`, eliminating rogue flooding and buffer starvation attacks.
+  - **Local Pending Message Protection:** Rewrote `PruneIfNeeded` eviction priorities to strictly protect local unsent messages (`bytes.Equal(msg.Src, s.localID) && msg.Status == StatusPending`). The store strictly evicts: (1) expired messages, (2) delivered messages, (3) transit relay messages, and (4) local messages whose spray copies have been fully exhausted.
+  - **BoltDB Corruption Auto-Recovery:** Enhanced `OpenStore` to detect corrupted database headers or invalid page tables on startup, automatically archive the damaged database file (`*.corrupt.<timestamp>`), and initialize a clean database without crashing or stranding service startup.
+- **Direct Delivery Retries & Dedup Ring Buffer:**
+  - Added direct delivery retry tracking (up to 3 encounter attempts) before marking a message delivered in the DTN router, eliminating single-encounter packet drop losses.
+  - Bounded `DedupCache` with 2,048 entries, 24-hour TTL, and $O(1)$ ring buffer eviction.
+- **Power Policy Engine Low-Battery Relay Cutoff & Hysteresis (`PowerPolicyEngine.kt`):**
+  - **Strict Low-Battery Cutoff:** Forces `relayWillingness = 0.0f` whenever battery level drops below 20% while not charging, universally across ALL security postures (`STEALTH`, `PROTEST`, `EMERGENCY`).
+  - **Battery Threshold Hysteresis:** Enforces a $\pm 2\%$ hysteresis band: enters `CRITICAL` mode at $<20\%$ and only exits back to `ECO` or `ACTIVE` when battery recovers to $\ge 22\%$ (or when actively charging).
+- **Rust / JNI Native Cryptographic Boundary Hardening (`ghost-crypto`):**
+  - Extracted pure Rust core functions (`generate_identity_core`, `encrypt_core`, `decrypt_core`, `sign_core`, `verify_core`) completely decoupled from JNI types.
+  - Wrapped all exported JNI functions (`Java_com_ghostprotocol_crypto_GhostCrypto_*`) in `std::panic::catch_unwind(AssertUnwindSafe(|| { ... }))`. Any native panic (allocation failure, slice bounds check) is caught and cleanly rethrown as a JVM `java/lang/RuntimeException` rather than aborting the Android process.
+  - Added 12 pure-Rust unit tests verifying identity key generation, encryption roundtrips, tampered ciphertext rejection, tampered nonce rejection, tampered signature rejection, and invalid key lengths.
+- **Multi-Node Discrete Mesh Simulator (`simulator_test.go`):**
+  - Added a deterministic discrete-event simulator verifying multi-node mesh topologies across 7 production scenarios: Direct Delivery, Multi-Hop Line Routing, Partition & Reconvergence, Node Churn, 30% Radio Loss Tolerance, Duplicate Encounters, and Battery-Constrained Relay Refusal.
+
+### Changed & Fixed
+- **Group Protocol Test Suite:** Added 7 regression test cases in `GroupProtocolTest.kt` verifying Cell Group invite delivery, offline DTN routing, self-healing metadata recovery, idempotent reception, malformed envelope rejection, process restarts, and duplicate suppression.
+- **Android Unit Tests:** Expanded test coverage to 43 unit test cases passing 100% across debug and release configurations.
+
+---
+
+## [v0.3.8] — 2026-09-04
+
+**UI/UX & Jetpack Compose Architecture Hardening** release. Focused on locking protocol features to eliminate UI thread latency, eliminate list recomposition churn, standardize interactive touch targets to 48dp, and improve UI responsiveness.
+
+### Added
+- **`ChatViewModel` & Optimistic UI Loop (<1ms Perceived Latency):**
+  - Extracted state management out of `ChatScreen.kt` into a standalone `ChatViewModel`.
+  - Tapping Send immediately prepends an in-memory `PENDING` bubble to the UI `StateFlow` (<1ms perceived UI acknowledgement), decoupling user visual feedback from asynchronous Room DB transactions, AES-256-GCM encryption, and BLE/DTN dispatch.
+  - Automatically reconciles optimistic items with Room database emissions via composite deduplication keys (`pending_${id}`).
+- **Unified `ConversationRepository` & Off-Thread Data Processing:**
+  - Aggregates 1:1 direct mesh contacts and Cell Groups into a single chronologically sorted `Flow<List<ConversationItem>>`.
+  - All multi-table joins, latest message resolution, and O(1) RF peer fingerprint matching execute on `Dispatchers.Default`, shielding the UI thread from database or cryptographic overhead.
+  - Pre-indexes discovered BLE peers by MAC address and canonical 8-character hex fingerprint, eliminating on-the-fly `MessageDigest` SHA-256 computation and `Base64` decoding inside `LazyColumn` item renderers.
+- **`GhostComponents` Reusable Design System:**
+  - `GhostStatusIndicator`: Authoritative, calm protocol status indicator (`•` pending dot, `✓` sent tick, `✓✓` delivered double-check in `#BB86FC`, `!` failed with retry, `∿` DTN mesh wave).
+  - `GhostBadge`: Standardized metadata chips (`VERIFIED`, `INTRODUCED`, `CELL`).
+  - `GhostEmptyState`: Minimalist, confident empty states across conversations, 1:1 chat, and Cell Groups without emojis.
+  - `GhostActionFab`: Unified 56dp floating action button (`+`) replacing the 4 vertically stacked buttons on the main screen.
+  - `NewChatBottomSheet`: Accessible modal bottom sheet consolidating Scan QR, Show QR, Short Code, and Create Cell Group workflows.
+- **Cell Group Two-Tier Invite & Self-Healing Delivery (`com.ghostprotocol.group`):**
+  - **Opcode `0x31` (`OPCODE_GROUP_INVITE`):** Cryptographic wire protocol codec (`[0x31 || 32B groupId || 16B creatorId || 8B ts || ciphertext || 64B sig]`) dispatched immediately upon group creation to all verified members over BLE and Go DTN router. Fits within a single 512-byte ATT MTU write (~261 bytes).
+  - **Creator Verification & High-Priority Popups:** Recipient devices verify creator authenticity against verified contacts, verify Ed25519 signature, insert `GroupEntity` into Room DB, log a system welcome message, and trigger `NotificationHelper.showGroupInviteNotification` with direct group navigation.
+  - **Self-Healing `META` Payloads (`0x30`):** Outgoing group message envelopes embed group metadata (`META\0groupName\0creatorId\0membersJson`) within pairwise ciphertext. Members who were out of radio range during group creation automatically self-heal, instantiate the group record, post the invite notification, and save the incoming message on first receipt.
+- **Strict 48dp Physical Touch Targets:**
+  - Enforced `GhostTheme.MinTouchTarget = 48.dp` across all interactive icon buttons, send triggers, back navigation, and list rows.
+- **Navigation & Lifecycle Hardening:**
+  - Replaced vertical modal navigation transitions with responsive 220ms horizontal slide transitions (`slideInHorizontally` / `slideOutHorizontally`).
+  - Removed aggressive `CAMERA` permission request on application startup; camera permission is now requested lazily only when launching the QR scanner.
+  - Guarded battery optimization exclusion requests with persistent shared preferences to avoid repeated startup prompts.
+
+### Changed & Optimized
+- **60 FPS Scrolling Performance:**
+  - Removed the 1-second `delay(1000)` polling ticker loop from `ContactListScreen.kt` that was triggering redundant full-screen recompositions every second.
+  - Hoisted dynamic sweeps and gradient brushes into static properties in `GhostTheme.kt`, eliminating per-frame graphic allocations.
+  - Disabled infinite rotation animations in avatars within list items by default (`animateEtherealRing = false`), eliminating continuous CPU/GPU composition loops.
+  - Replaced dynamic linear gradient shimmers on `STATUS_SPRAYED` bubbles with a static hoisted `GhostTheme.SprayedBorder`.
+
+---
+
 ## [v0.3.7] — 2026-09-04
 
 Major feature release implementing **Delivery Receipts** (`✓✓`) — end-to-end cryptographic acknowledgments (Opcode `0x40`) proving that a recipient has successfully decrypted and committed a message to Room database storage.

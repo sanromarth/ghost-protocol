@@ -356,6 +356,46 @@ object NotificationHelper {
         }
     }
 
+    fun showGroupInviteNotification(
+        context: Context,
+        groupName: String,
+        creatorName: String,
+        groupId: String
+    ) {
+        try {
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            ensureGroupChannel(manager)
+
+            val openIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("OPEN_GROUP_ID", groupId)
+            }
+            val openPendingIntent = PendingIntent.getActivity(
+                context,
+                ((groupId.hashCode() * 31 + 11) and 0x7FFFFFFF),
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notificationId = 6500 + (groupId.hashCode() and 0xFFFF)
+            val notification = NotificationCompat.Builder(context, CHANNEL_GROUP_MESSAGES)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle("New Cell Group: $groupName")
+                .setContentText("$creatorName added you to this encrypted cell")
+                .setColor(0xFF9D4EDD.toInt())
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
+                .setAutoCancel(true)
+                .setContentIntent(openPendingIntent)
+                .build()
+
+            manager.notify(notificationId, notification)
+            Log.d(TAG, "GHOST_GROUP: Group invite notification posted for $groupName (id=$notificationId)")
+        } catch (e: Exception) {
+            Log.e(TAG, "GHOST_GROUP: Error showing group invite notification: ${e.message}", e)
+        }
+    }
+
     private fun ensureIntroductionsChannel(manager: NotificationManager) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (manager.getNotificationChannel(CHANNEL_INTRODUCTIONS) == null) {

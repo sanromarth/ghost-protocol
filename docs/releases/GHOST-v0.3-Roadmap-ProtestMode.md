@@ -1,29 +1,27 @@
 # GHOST Protocol — v0.3 Specification: Protest Mode & Frictionless Contact Discovery
 
-> **Target Release:** v0.3.0  
-> **Status:** Approved Architectural Specification  
-> **Category:** Identity, Discovery & Real-World Usability  
-> **Last Updated:** 2026-09-03  
+> **Author:** PEDDI SANKARA RAO
+> **Target Release:** v0.3.0
+> **Status:** Approved Architectural Specification
+> **Category:** Identity, Discovery & Real-World Usability
+> **Last Updated:** 2026-09-03
 
 ---
 
-## 1. Executive Summary & The Product Reality
+## 1. Overview and Operational Context
 
-GHOST v0.1.5 and v0.2 established an uncompromising cryptographic baseline: **zero trust-on-first-use (TOFU), zero central servers, zero metadata leakage, and QR-only in-person key exchange**. By forcing users to scan a 64-byte cryptographic QR code face-to-face, GHOST completely eliminates Man-in-the-Middle (MITM) attacks and persistent public tracking.
+GHOST initially required face-to-face exchange of a 64-byte cryptographic QR code to establish contacts without trust-on-first-use (TOFU) or central servers.
 
-**However, this creates a critical usability failure in hostile, dynamic environments:**
+Physical QR verification presents operational challenges in rapid or constrained environments:
 
-| Scenario | What GHOST Currently Demands | What Real-World Users Need |
+| Scenario | QR Exchange Constraint | Operational Requirement |
 |---|---|---|
-| **Protest under police kettling** | Stop running, wipe tear gas/dirt from screen, open app, align cameras 10cm apart, wait for ZXing parse (30s) | Instant 3-second alert to someone 10m away: *"Police incoming from North"* |
-| **Earthquake / Disaster zone** | Cracked screen, dust, rubble, panic; camera alignment fails | Coordinate search and rescue without touch-screen alignment ritual |
-| **Rapid Transit / Flight** | Awkward physical camera pointing in crowded seating | Automatic nearby discovery with one-tap consent |
-| **Dense Crowd / Festival** | Loud music, moving crowd, cannot hold phones steady | Verbal 4-word code shouted across the space or written on a sign |
+| **Active crowd movement** | Aligning cameras 10cm apart takes 30s | Rapid discovery and link establishment |
+| **Damaged device hardware** | Broken cameras or cracked screens fail QR scan | Key exchange without optical dependency |
+| **Physical distance** | Limited to visual range of phone screen | Out-of-band short identifier sharing |
+| **Auditory / visual relay** | Cannot point camera directly at peer | 4-word code verbal or written exchange |
 
-> [!IMPORTANT]
-> **Core Principle:** *Privacy without usability is fatal in survival scenarios.* If an activist cannot establish a secure link with a peer because both are fleeing a tear gas canister, the cryptographic security of the app is irrelevant.
-
-To bridge the gap between cryptographic purity and real-world survival, GHOST v0.3 introduces **"Protest Mode"**: a consent-based, friction-reduced discovery suite that maintains strict metadata privacy while slashing connection latency from 30+ seconds to **under 3 seconds**.
+To support environments where optical scanning is impractical, GHOST v0.3 introduces **Protest Mode**: an explicit-consent discovery mechanism supporting one-tap local BLE discovery and rotating short codes while preserving metadata privacy.
 
 ---
 
@@ -75,12 +73,12 @@ flowchart TD
 2. User B (10 meters away) also runs GHOST in Protest Mode.
 3. User A's BLE scanner detects User B's 4-byte key fingerprint in primary advertisement packets.
 4. User A's phone buzzes with a high-priority system notification:
-   > **GHOST User Nearby**  
+   > **GHOST User Nearby**
    > *Discovered peer #a3f7e2 nearby. Tap to establish secure connection.*
 5. User A taps **"Connect"**.
 6. User A's device initiates a lightweight BLE GATT connection to User B, writing an encrypted `DISCOVERY_REQUEST` packet.
 7. User B's device displays an incoming authorization prompt:
-   > **Incoming Contact Request**  
+   > **Incoming Contact Request**
    > *User 'Alice' (#e914b1) wants to connect. Accept?*
 8. User B taps **"Accept"**.
 9. Both devices exchange Ed25519 & X25519 public key bundles, insert each other into Room DB, and initiate end-to-end encrypted messaging.
@@ -233,7 +231,7 @@ enum class SecurityPosture {
 ---
 
 ## 6. Implementation Roadmap
- 
+
 | Milestone | Deliverable | Status |
 |---|---|---|
 | **v0.2.0** | PowerPolicyEngine, Battery Telemetry, GATT Batching, Store-and-Forward Re-encounter Delivery | ✅ Complete (2026-09-02) |
@@ -241,10 +239,11 @@ enum class SecurityPosture {
 | **v0.3.5** | **Cell Groups:** 8-member pairwise encrypted group chat, Room v7, Opcode `0x30` | ✅ Complete (2026-09-04) |
 | **v0.3.6** | **Contact Introductions:** Alice introduces Bob to Carol via signed encrypted envelope, Room v9, Opcode `0x50` | ✅ Complete (2026-09-04) |
 | **v0.3.7** | **Delivery Receipts:** End-to-end cryptographic delivery acks (`✓✓`), Room v8, Opcode `0x40` | ✅ Complete (2026-09-04) |
+| **v0.3.8** | **UI/UX & Architecture Hardening:** Sub-1ms optimistic bubble ACK, off-thread `ConversationRepository`, 60 FPS scrolling, 48dp targets | ✅ Complete (2026-09-04) |
 | **v0.4.0** | Channel 0 Emergency Broadcast (local unencrypted multi-hop mesh alert bursts) | 📅 Scheduled |
 
 ---
 
 ## 7. Conclusion
 
-GHOST's original QR-only requirement was an essential cryptographic foundation to establish zero-TOFU security. However, authentic security must serve human survival in chaotic physical reality. **Protest Mode preserves GHOST's strict privacy guarantees (no MITM, no persistent IDs, zero unauthenticated spam) while delivering the rapid, fluid contact creation that real-world activists and disaster survivors need.**
+Protest Mode complements QR-based key exchange with consent-gated BLE discovery and rotating short codes. This provides operational flexibility under adverse field conditions while maintaining authentication, avoiding persistent broadcast identifiers, and preventing unauthenticated spam.

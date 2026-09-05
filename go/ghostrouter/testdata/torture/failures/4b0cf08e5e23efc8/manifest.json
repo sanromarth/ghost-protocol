@@ -1,0 +1,97 @@
+{
+  "campaign_seed": 123456789,
+  "scenario_index": 1043,
+  "derived_seed": 5792326070067791545,
+  "configuration": {
+    "campaign_seed": 123456789,
+    "scenario_index": 1043,
+    "derived_seed": 5792326070067791545,
+    "name": "combination_1043_ring_minimized",
+    "category": "combination",
+    "topology": "ring",
+    "nodes": [
+      "combo_0",
+      "combo_1",
+      "combo_2",
+      "combo_3"
+    ],
+    "initial_links": [
+      [
+        "combo_0",
+        "combo_1"
+      ],
+      [
+        "combo_1",
+        "combo_2"
+      ],
+      [
+        "combo_2",
+        "combo_3"
+      ],
+      [
+        "combo_3",
+        "combo_0"
+      ]
+    ],
+    "events": [
+      {
+        "type": "set_global_loss",
+        "loss_rate": 0.5
+      },
+      {
+        "type": "send_message",
+        "source": "combo_2",
+        "dest": "combo_1",
+        "payload": "Y29tYm9fcGF5bG9hZF8xMDQzXzA="
+      },
+      {
+        "type": "send_message",
+        "source": "combo_3",
+        "dest": "combo_1",
+        "payload": "Y29tYm9fcGF5bG9hZF8xMDQzXzE="
+      },
+      {
+        "type": "send_message",
+        "source": "combo_1",
+        "dest": "combo_1",
+        "payload": "Y29tYm9fcGF5bG9hZF8xMDQzXzI="
+      },
+      {
+        "type": "exchange_all"
+      },
+      {
+        "type": "crash",
+        "source": "combo_1"
+      },
+      {
+        "type": "exchange_all"
+      },
+      {
+        "type": "restart",
+        "source": "combo_1"
+      },
+      {
+        "type": "exchange_all"
+      },
+      {
+        "type": "advance_time",
+        "duration": 540000000000
+      },
+      {
+        "type": "exchange_all"
+      }
+    ]
+  },
+  "violation": {
+    "id": "I6_Dedup",
+    "message": "Duplicate logical delivery of payload (count=2)",
+    "node": "combo_1"
+  },
+  "severity": "P2",
+  "signature": "4b0cf08e5e23efc8",
+  "reproduction_cmd": "ghost-sim replay --seed 5792326070067791545",
+  "original_nodes": 4,
+  "minimized_nodes": 4,
+  "original_events": 12,
+  "minimized_events": 11
+}

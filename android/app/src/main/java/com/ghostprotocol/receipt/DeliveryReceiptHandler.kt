@@ -6,6 +6,7 @@ import com.ghostprotocol.IdentityManager
 import com.ghostprotocol.ble.BleManager
 import com.ghostprotocol.data.ContactDao
 import com.ghostprotocol.data.GroupMessageDao
+import com.ghostprotocol.data.GroupMessageEntity
 import com.ghostprotocol.data.MessageDao
 import com.ghostprotocol.data.MessageEntity
 import com.ghostprotocol.router.GhostRouter
@@ -137,6 +138,7 @@ class DeliveryReceiptHandler(
                         list.add(receipt.recipientContactId)
                         val newJson = JSONArray(list).toString()
                         groupMessageDao.updateDeliveredMembers(groupMsg.id, newJson)
+                        groupMessageDao.updateStatus(groupMsg.id, GroupMessageEntity.STATUS_DELIVERED)
                         Log.d(TAG, "Group message ${groupMsg.id} delivered to ${receipt.recipientContactId}, count ${list.size}")
                     }
                     return@launch

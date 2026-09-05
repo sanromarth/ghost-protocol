@@ -131,4 +131,16 @@ class GhostRouter(
             Log.e(TAG, ">>> ROUTER: setRelayWillingness error: ${e.message}")
         }
     }
+
+    /**
+     * Explicitly mark a transit message as delivered upon end-to-end receipt confirmation.
+     */
+    fun markDelivered(msgId: ByteArray) {
+        try {
+            router?.markDelivered(msgId)
+            Log.d(TAG, ">>> ROUTER: marked msg ${msgId.take(4).joinToString("") { "%02x".format(it) }} as delivered")
+        } catch (e: Exception) {
+            Log.e(TAG, ">>> ROUTER: markDelivered error: ${e.message}")
+        }
+    }
 }

@@ -12,6 +12,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.*
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -72,8 +73,36 @@ object BleManager {
     val peers: StateFlow<List<DiscoveredPeer>> = _peers.asStateFlow()
     private var peerPruningJob: Job? = null
 
-    private val _incomingMessages = MutableSharedFlow<IncomingBleMessage>(replay = 0, extraBufferCapacity = 64)
+    private val _incomingMessages = MutableSharedFlow<IncomingBleMessage>(
+        replay = 0,
+        extraBufferCapacity = 256,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
     val incomingMessages: SharedFlow<IncomingBleMessage> = _incomingMessages.asSharedFlow()
+
+    // v0.3.8: Reassembly state for fragmented inbound GATT writes (Opcode 0xFB)
+    data class ReassemblySession(
+        val transferId: Int,
+        val totalFragments: Int,
+        val fragments: Array<ByteArray?>,
+        var receivedCount: Int,
+        var totalBytes: Int,
+        val createdAt: Long = System.currentTimeMillis()
+    )
+
+    private const val MAX_REASSEMBLY_SESSIONS = 16
+    private const val REASSEMBLY_TIMEOUT_MS = 30_000L
+    private val reassemblySessions = ConcurrentHashMap<String, ReassemblySession>()
+
+    // Serialized GATT client queue to prevent GATT 133 and resource leaks
+    val gattQueue = GattOperationQueue(
+        contextProvider = { context },
+        adapterProvider = { adapter },
+        serviceUuid = SERVICE_UUID,
+        characteristicUuid = MESSAGE_CHAR_UUID,
+        onBytesTx = { bytes -> gattBytesTx.addAndGet(bytes.toLong()) },
+        onConnectionCountInc = { gattConnectionCount.incrementAndGet() }
+    )
 
     // ===== POLICY STATE =====
     // Current policy values (updated by PowerPolicyEngine via GhostService)
@@ -189,6 +218,10 @@ object BleManager {
 
         try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: Exception) {}
         try { scanner?.stopScan(scanCallback) } catch (_: Exception) {}
+
+        // Cancel and cleanly close all outbound client GATT operations
+        gattQueue.cancelAll()
+        reassemblySessions.clear()
 
         try { gattServer?.close() } catch (_: Exception) {}
         gattServer = null
@@ -432,6 +465,9 @@ object BleManager {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             val stateStr = if (newState == BluetoothProfile.STATE_CONNECTED) "CONNECTED" else "DISCONNECTED"
             Log.d(TAG, ">>> GATT SERVER: device ${device.address} $stateStr (status=$status)")
+            if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                reassemblySessions.remove(device.address)
+            }
         }
 
         @SuppressLint("MissingPermission")
@@ -445,52 +481,152 @@ object BleManager {
                 Log.d(TAG, ">>> GATT SERVER: Write request from ${device.address}, ${value.size} bytes, responseNeeded=$responseNeeded")
                 gattBytesRx.addAndGet(value.size.toLong())
 
-                // Demux discovery and short code opcodes (0x10, 0x11, 0x20, 0x21)
-                if (value.isNotEmpty()) {
-                    when (value[0]) {
-                        DiscoveryProtocol.OPCODE_REQUEST -> {
-                            if (responseNeeded) {
-                                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-                            }
-                            discoveryManager?.onIncomingRequest(device.address, value)
-                            return
-                        }
-                        DiscoveryProtocol.OPCODE_RESPONSE -> {
-                            if (responseNeeded) {
-                                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-                            }
-                            discoveryManager?.onIncomingResponse(device.address, value)
-                            return
-                        }
-                        ShortCodeProtocol.OPCODE_QUERY -> {
-                            if (responseNeeded) {
-                                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-                            }
-                            discoveryManager?.onIncomingShortCodeQuery(device.address, value)
-                            return
-                        }
-                        ShortCodeProtocol.OPCODE_RESPONSE -> {
-                            if (responseNeeded) {
-                                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-                            }
-                            discoveryManager?.onIncomingShortCodeResponse(device.address, value)
-                            return
-                        }
-                    }
+                // Check for transport fragmentation (0xFB)
+                if (value.isNotEmpty() && value[0] == GattOperationQueue.OPCODE_BLE_FRAGMENT) {
+                    handleFragmentWrite(device, requestId, responseNeeded, value)
+                    return
                 }
 
-                val emitted = _incomingMessages.tryEmit(IncomingBleMessage(device.address, value))
+                // Unfragmented payload: 100% backward compatible path
                 if (responseNeeded) {
-                    val status = if (emitted) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
-                    gattServer?.sendResponse(device, requestId, status, 0, null)
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
                 }
-                if (!emitted) {
-                    Log.e(TAG, ">>> GATT SERVER: SharedFlow buffer full! Dropped message from ${device.address}")
-                }
+                handleIncomingPayload(device.address, value)
             } else {
                 Log.e(TAG, ">>> GATT SERVER: Write request with wrong UUID or null value from ${device.address}")
                 if (responseNeeded) {
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
+                }
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        private fun handleFragmentWrite(
+            device: BluetoothDevice,
+            requestId: Int,
+            responseNeeded: Boolean,
+            value: ByteArray
+        ) {
+            // Validate minimum header size
+            if (value.size < GattOperationQueue.FRAGMENT_HEADER_SIZE) {
+                Log.w(TAG, ">>> GATT SERVER: Dropping truncated 0xFB frame (${value.size} bytes) from ${device.address}")
+                if (responseNeeded) {
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
+                }
+                return
+            }
+
+            val transferId = ((value[1].toInt() and 0xFF) shl 8) or (value[2].toInt() and 0xFF)
+            val fragIndex = ((value[3].toInt() and 0xFF) shl 8) or (value[4].toInt() and 0xFF)
+            val totalFrags = ((value[5].toInt() and 0xFF) shl 8) or (value[6].toInt() and 0xFF)
+            val slice = value.copyOfRange(GattOperationQueue.FRAGMENT_HEADER_SIZE, value.size)
+
+            // Parameter bounds checking
+            if (totalFrags !in 2..GattOperationQueue.MAX_TOTAL_FRAGMENTS ||
+                fragIndex !in 0 until totalFrags ||
+                slice.isEmpty()) {
+                Log.w(TAG, ">>> GATT SERVER: Malformed fragment from ${device.address}: tid=$transferId, idx=$fragIndex, total=$totalFrags, sliceLen=${slice.size}")
+                if (responseNeeded) {
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
+                }
+                return
+            }
+
+            // Clean expired sessions
+            val now = System.currentTimeMillis()
+            reassemblySessions.entries.removeIf { now - it.value.createdAt > REASSEMBLY_TIMEOUT_MS }
+
+            // Retrieve or create reassembly session
+            var session = reassemblySessions[device.address]
+            if (session != null && session.transferId != transferId) {
+                Log.w(TAG, ">>> GATT SERVER: New transferId $transferId from ${device.address}, discarding incomplete transfer ${session.transferId}")
+                reassemblySessions.remove(device.address)
+                session = null
+            }
+
+            if (session == null) {
+                if (reassemblySessions.size >= MAX_REASSEMBLY_SESSIONS) {
+                    val oldestKey = reassemblySessions.minByOrNull { it.value.createdAt }?.key
+                    if (oldestKey != null) reassemblySessions.remove(oldestKey)
+                }
+                session = ReassemblySession(
+                    transferId = transferId,
+                    totalFragments = totalFrags,
+                    fragments = arrayOfNulls(totalFrags),
+                    receivedCount = 0,
+                    totalBytes = 0
+                )
+                reassemblySessions[device.address] = session
+            }
+
+            // Idempotent fragment insertion
+            if (session.fragments[fragIndex] == null) {
+                session.fragments[fragIndex] = slice
+                session.receivedCount++
+                session.totalBytes += slice.size
+            }
+
+            // Check bounded reconstructed size
+            if (session.totalBytes > GattOperationQueue.MAX_RECONSTRUCTED_PAYLOAD_BYTES) {
+                Log.e(TAG, ">>> GATT SERVER: Reassembled payload exceeded ${GattOperationQueue.MAX_RECONSTRUCTED_PAYLOAD_BYTES} bytes from ${device.address}; aborting session")
+                reassemblySessions.remove(device.address)
+                if (responseNeeded) {
+                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
+                }
+                return
+            }
+
+            // Immediately acknowledge write request so client can proceed with next chunk
+            if (responseNeeded) {
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            }
+
+            // Check if transfer is complete
+            if (session.receivedCount == session.totalFragments) {
+                reassemblySessions.remove(device.address)
+                val fullData = ByteArray(session.totalBytes)
+                var offset = 0
+                for (i in 0 until session.totalFragments) {
+                    val frag = session.fragments[i]
+                    if (frag == null) {
+                        Log.e(TAG, ">>> GATT SERVER: Reassembly slot $i missing for transferId $transferId from ${device.address}")
+                        return
+                    }
+                    System.arraycopy(frag, 0, fullData, offset, frag.size)
+                    offset += frag.size
+                }
+
+                // Nesting prohibition
+                if (fullData.isNotEmpty() && fullData[0] == GattOperationQueue.OPCODE_BLE_FRAGMENT) {
+                    Log.e(TAG, ">>> GATT SERVER: Nested 0xFB fragment rejected from ${device.address}")
+                    return
+                }
+
+                Log.d(TAG, ">>> GATT SERVER: Successfully reassembled transfer $transferId (${fullData.size} bytes in ${session.totalFragments} frags) from ${device.address}")
+                handleIncomingPayload(device.address, fullData)
+            }
+        }
+
+        private fun handleIncomingPayload(address: String, payload: ByteArray) {
+            if (payload.isEmpty()) return
+            when (payload[0]) {
+                DiscoveryProtocol.OPCODE_REQUEST -> {
+                    discoveryManager?.onIncomingRequest(address, payload)
+                }
+                DiscoveryProtocol.OPCODE_RESPONSE -> {
+                    discoveryManager?.onIncomingResponse(address, payload)
+                }
+                ShortCodeProtocol.OPCODE_QUERY -> {
+                    discoveryManager?.onIncomingShortCodeQuery(address, payload)
+                }
+                ShortCodeProtocol.OPCODE_RESPONSE -> {
+                    discoveryManager?.onIncomingShortCodeResponse(address, payload)
+                }
+                else -> {
+                    val emitted = _incomingMessages.tryEmit(IncomingBleMessage(address, payload))
+                    if (!emitted) {
+                        Log.e(TAG, ">>> GATT SERVER: SharedFlow buffer full! Dropped message from $address")
+                    }
                 }
             }
         }
@@ -501,299 +637,22 @@ object BleManager {
         }
     }
 
-    // ===== GATT CLIENT (send single message) =====
+    // ===== GATT CLIENT (serialized queue) =====
 
     @SuppressLint("MissingPermission")
     fun sendMessage(macAddress: String, data: ByteArray, onResult: (Boolean) -> Unit) {
-        val ctx = context ?: run {
-            Log.e(TAG, ">>> GATT CLIENT: No context, cannot send")
-            onResult(false)
-            return
-        }
-        val device = try {
-            adapter?.getRemoteDevice(macAddress)
-        } catch (e: IllegalArgumentException) {
-            Log.e(TAG, ">>> GATT CLIENT: Invalid MAC address '$macAddress': ${e.message}")
-            null
-        } ?: run {
-            Log.e(TAG, ">>> GATT CLIENT: Cannot get remote device $macAddress")
-            onResult(false)
-            return
-        }
-
-        Log.d(TAG, ">>> GATT CLIENT: Connecting to $macAddress to send ${data.size} bytes")
-        gattConnectionCount.incrementAndGet()
-
-        val resultDelivered = java.util.concurrent.atomic.AtomicBoolean(false)
-        fun deliverResult(success: Boolean) {
-            if (resultDelivered.compareAndSet(false, true)) {
-                onResult(success)
-            }
-        }
-
-        // Timeout handler — if GATT doesn't respond in 10 seconds, abort
-        val timeoutHandler = android.os.Handler(android.os.Looper.getMainLooper())
-        var gattRef: BluetoothGatt? = null
-
-        val gatt = device.connectGatt(ctx, false, object : BluetoothGattCallback() {
-            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-                if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    if (status == BluetoothGatt.GATT_SUCCESS) {
-                        Log.d(TAG, ">>> GATT CLIENT: Connected to $macAddress, requesting MTU 512")
-                        gatt.requestMtu(512)
-                    } else {
-                        Log.e(TAG, ">>> GATT CLIENT: Connection to $macAddress failed, status=$status")
-                        gatt.close()
-                        deliverResult(false)
-                    }
-                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    Log.d(TAG, ">>> GATT CLIENT: Disconnected from $macAddress (status=$status)")
-                    gatt.close()
-                    // If we disconnected before write completed, deliver failure
-                    deliverResult(false)
-                }
-            }
-
-            override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.d(TAG, ">>> GATT CLIENT: MTU negotiated: $mtu bytes, discovering services...")
-                } else {
-                    Log.e(TAG, ">>> GATT CLIENT: MTU request failed (status=$status), proceeding with default MTU")
-                }
-                // Discover services regardless — even with small MTU, short messages may work
-                gatt.discoverServices()
-            }
-
-            override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-                if (status != BluetoothGatt.GATT_SUCCESS) {
-                    Log.e(TAG, ">>> GATT CLIENT: Service discovery FAILED (status=$status)")
-                    gatt.disconnect()
-                    deliverResult(false)
-                    return
-                }
-                val service = gatt.getService(SERVICE_UUID)
-                if (service == null) {
-                    Log.e(TAG, ">>> GATT CLIENT: Service $SERVICE_UUID NOT FOUND on $macAddress")
-                    gatt.disconnect()
-                    deliverResult(false)
-                    return
-                }
-                val char = service.getCharacteristic(MESSAGE_CHAR_UUID)
-                if (char == null) {
-                    Log.e(TAG, ">>> GATT CLIENT: Characteristic $MESSAGE_CHAR_UUID NOT FOUND")
-                    gatt.disconnect()
-                    deliverResult(false)
-                    return
-                }
-                // Set value and write type BEFORE calling writeCharacteristic
-                char.value = data
-                char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                val writeInitiated = gatt.writeCharacteristic(char)
-                Log.d(TAG, ">>> GATT CLIENT: Write initiated=${writeInitiated}, ${data.size} bytes to $macAddress")
-                if (!writeInitiated) {
-                    Log.e(TAG, ">>> GATT CLIENT: writeCharacteristic() returned false!")
-                    gatt.disconnect()
-                    deliverResult(false)
-                }
-            }
-
-            override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-                val success = status == BluetoothGatt.GATT_SUCCESS
-                if (success) {
-                    Log.d(TAG, ">>> GATT CLIENT: Write SUCCESS to ${gatt.device.address}")
-                    gattBytesTx.addAndGet(data.size.toLong())
-                } else {
-                    Log.e(TAG, ">>> GATT CLIENT: Write FAILED to ${gatt.device.address}, status=$status")
-                }
-                gatt.disconnect()
-                deliverResult(success)
-            }
-        })
-        gattRef = gatt
-
-        // Schedule 10-second timeout — if GATT never responds, clean up
-        timeoutHandler.postDelayed({
-            if (resultDelivered.get()) return@postDelayed
-            Log.e(TAG, ">>> GATT CLIENT: Connection timeout after 10s to $macAddress")
-            try { gattRef?.close() } catch (_: Exception) {}
-            deliverResult(false)
-        }, 10_000)
+        gattQueue.enqueue(macAddress, listOf(data), 10_000L, onResult)
     }
 
-    // ===== GATT CLIENT (send batch — multiple messages, one connection) =====
-
-    /**
-     * Send a batched blob containing multiple messages over a single GATT connection.
-     * Parses the batch header (1 byte count + length-prefixed messages), writes each
-     * message chunk as a separate GATT write, chaining sequentially via
-     * onCharacteristicWrite callbacks to avoid overflowing the BLE L2CAP buffer.
-     *
-     * @param macAddress The BLE MAC address of the peer
-     * @param batchData The batched blob: [1B count][4B len1][msg1][4B len2][msg2]...
-     * @param onResult Called with true if ALL writes succeeded, false otherwise
-     */
     @SuppressLint("MissingPermission")
     fun sendBatch(macAddress: String, batchData: ByteArray, onResult: (Boolean) -> Unit) {
-        val ctx = context ?: run {
-            Log.e(TAG, ">>> BATCH CLIENT: No context, cannot send")
+        val chunks = GattOperationQueue.parseBatchChunks(batchData)
+        if (chunks == null || chunks.isEmpty()) {
+            Log.e(TAG, ">>> BATCH CLIENT: Invalid or empty batch data")
             onResult(false)
             return
         }
-
-        // Parse batch header to extract individual message chunks
-        if (batchData.isEmpty()) {
-            Log.e(TAG, ">>> BATCH CLIENT: empty batch data")
-            onResult(false)
-            return
-        }
-        val count = batchData[0].toInt() and 0xFF
-        if (count < 1) {
-            Log.e(TAG, ">>> BATCH CLIENT: invalid batch count=$count")
-            onResult(false)
-            return
-        }
-
-        val chunks = mutableListOf<ByteArray>()
-        var offset = 1
-        for (i in 0 until count) {
-            if (offset + 4 > batchData.size) {
-                Log.e(TAG, ">>> BATCH CLIENT: batch truncated at message $i")
-                onResult(false)
-                return
-            }
-            val msgLen = ByteBuffer.wrap(batchData, offset, 4).order(ByteOrder.BIG_ENDIAN).getInt()
-            offset += 4
-            if (msgLen <= 0 || offset + msgLen > batchData.size) {
-                Log.e(TAG, ">>> BATCH CLIENT: invalid message length $msgLen at index $i")
-                onResult(false)
-                return
-            }
-            chunks.add(batchData.copyOfRange(offset, offset + msgLen))
-            offset += msgLen
-        }
-
-        Log.d(TAG, ">>> Batch send: ${chunks.size} messages, 1 connection to $macAddress")
-        gattConnectionCount.incrementAndGet()
-
-        val device = try {
-            adapter?.getRemoteDevice(macAddress)
-        } catch (e: IllegalArgumentException) {
-            Log.e(TAG, ">>> BATCH CLIENT: Invalid MAC address '$macAddress': ${e.message}")
-            null
-        } ?: run {
-            Log.e(TAG, ">>> BATCH CLIENT: Cannot get remote device $macAddress")
-            onResult(false)
-            return
-        }
-
-        val resultDelivered = java.util.concurrent.atomic.AtomicBoolean(false)
-        fun deliverResult(success: Boolean) {
-            if (resultDelivered.compareAndSet(false, true)) {
-                onResult(success)
-            }
-        }
-
-        val timeoutHandler = android.os.Handler(android.os.Looper.getMainLooper())
-        var gattRef: BluetoothGatt? = null
-        var writeIndex = 0  // Tracks which chunk we're writing next
-
-        val gatt = device.connectGatt(ctx, false, object : BluetoothGattCallback() {
-            var messageChar: BluetoothGattCharacteristic? = null
-
-            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-                if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    if (status == BluetoothGatt.GATT_SUCCESS) {
-                        Log.d(TAG, ">>> BATCH CLIENT: Connected to $macAddress, requesting MTU 512")
-                        gatt.requestMtu(512)
-                    } else {
-                        Log.e(TAG, ">>> BATCH CLIENT: Connection to $macAddress failed, status=$status")
-                        gatt.close()
-                        deliverResult(false)
-                    }
-                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    Log.d(TAG, ">>> BATCH CLIENT: Disconnected from $macAddress (status=$status)")
-                    gatt.close()
-                    deliverResult(false)
-                }
-            }
-
-            override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.d(TAG, ">>> BATCH CLIENT: MTU negotiated: $mtu bytes")
-                } else {
-                    Log.e(TAG, ">>> BATCH CLIENT: MTU request failed (status=$status), proceeding")
-                }
-                gatt.discoverServices()
-            }
-
-            override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-                if (status != BluetoothGatt.GATT_SUCCESS) {
-                    Log.e(TAG, ">>> BATCH CLIENT: Service discovery FAILED")
-                    gatt.disconnect()
-                    deliverResult(false)
-                    return
-                }
-                val service = gatt.getService(SERVICE_UUID)
-                val char = service?.getCharacteristic(MESSAGE_CHAR_UUID)
-                if (char == null) {
-                    Log.e(TAG, ">>> BATCH CLIENT: Service/Characteristic not found")
-                    gatt.disconnect()
-                    deliverResult(false)
-                    return
-                }
-                messageChar = char
-                // Start writing first chunk
-                writeNextChunk(gatt, char)
-            }
-
-            override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-                if (status != BluetoothGatt.GATT_SUCCESS) {
-                    Log.e(TAG, ">>> BATCH CLIENT: Write FAILED for chunk ${writeIndex - 1}, status=$status")
-                    gatt.disconnect()
-                    deliverResult(false)
-                    return
-                }
-                gattBytesTx.addAndGet(chunks[writeIndex - 1].size.toLong())
-                Log.d(TAG, ">>> BATCH CLIENT: Write SUCCESS chunk ${writeIndex - 1}/${chunks.size}")
-
-                if (writeIndex >= chunks.size) {
-                    // All chunks written successfully
-                    Log.d(TAG, ">>> BATCH CLIENT: All ${chunks.size} messages sent to $macAddress")
-                    gatt.disconnect()
-                    deliverResult(true)
-                } else {
-                    // Chain: write next chunk sequentially
-                    writeNextChunk(gatt, messageChar!!)
-                }
-            }
-
-            private fun writeNextChunk(gatt: BluetoothGatt, char: BluetoothGattCharacteristic) {
-                if (writeIndex >= chunks.size) {
-                    gatt.disconnect()
-                    deliverResult(true)
-                    return
-                }
-                val chunk = chunks[writeIndex]
-                writeIndex++
-                char.value = chunk
-                char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                val initiated = gatt.writeCharacteristic(char)
-                if (!initiated) {
-                    Log.e(TAG, ">>> BATCH CLIENT: writeCharacteristic() returned false for chunk ${writeIndex - 1}")
-                    gatt.disconnect()
-                    deliverResult(false)
-                }
-            }
-        })
-        gattRef = gatt
-
-        // Timeout: 10s + 5s per additional message, capped at 45s max
         val timeoutMs = minOf(45_000L, 10_000L + (chunks.size - 1) * 5_000L)
-        timeoutHandler.postDelayed({
-            if (resultDelivered.get()) return@postDelayed
-            Log.e(TAG, ">>> BATCH CLIENT: Timeout after ${timeoutMs}ms to $macAddress")
-            try { gattRef?.close() } catch (_: Exception) {}
-            deliverResult(false)
-        }, timeoutMs)
+        gattQueue.enqueue(macAddress, chunks, timeoutMs, onResult)
     }
 }

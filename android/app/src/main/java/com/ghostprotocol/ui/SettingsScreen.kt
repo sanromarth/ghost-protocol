@@ -631,7 +631,20 @@ fun SettingsScreen(navController: NavController) {
             item {
                 Text("About", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("GHOST v0.2")
+                Text(
+                    text = "GHOST Protocol v0.3.8",
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    color = GhostTheme.PurpleLight
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Decentralized, sovereign off-grid mesh communications. Zero servers, zero internet, zero central authority.",
+                    fontSize = 12.sp,
+                    color = GhostTheme.TextMuted,
+                    lineHeight = 16.sp
+                )
                 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
             }

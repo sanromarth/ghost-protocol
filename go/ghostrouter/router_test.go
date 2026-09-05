@@ -2,6 +2,7 @@ package ghostrouter
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -611,5 +612,200 @@ func TestRelayWillingnessGate(t *testing.T) {
 	router.SetRelayWillingness(10)
 	if w := router.GetRelayWillingness(); w != 1 {
 		t.Errorf("clamping >1: got %f, want 1", w)
+	}
+}
+
+func TestDedupCache(t *testing.T) {
+	cache := NewDedupCache(10, 60) // max 10 entries, 60s TTL
+	now := int64(1000)
+
+	// 1. Initial lookup -> not seen
+	if cache.Seen("msg1", now) {
+		t.Error("msg1 should not be seen initially")
+	}
+
+	// 2. Add and check -> seen
+	cache.Add("msg1", now)
+	if !cache.Seen("msg1", now) {
+		t.Error("msg1 should be seen immediately after add")
+	}
+
+	// 3. Expiration -> after 70s (> 60s TTL), Seen returns false
+	if cache.Seen("msg1", now+70) {
+		t.Error("msg1 should be expired after 70s")
+	}
+
+	// 4. FIFO capacity eviction under cache pressure
+	for i := 0; i < 15; i++ {
+		cache.Add(string(rune('A'+i)), now)
+	}
+	if cache.Size() > 10 {
+		t.Errorf("cache size %d exceeded maxEntries 10", cache.Size())
+	}
+	// Oldest entries (A, B, C, D, E) should have been evicted
+	if cache.Seen(string('A'), now) {
+		t.Error("entry 'A' should have been evicted by FIFO pressure")
+	}
+	// Newest entry (O) must still exist
+	if !cache.Seen(string('O'), now) {
+		t.Error("entry 'O' should still exist in cache")
+	}
+}
+
+func TestPrunePreservesLocalPendingMessages(t *testing.T) {
+	store, err := OpenStore(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("OpenStore failed: %v", err)
+	}
+	defer store.Close()
+
+	localID := bytes.Repeat([]byte{0xAA}, 32)
+	store.SetLocalID(localID)
+	now := time.Now().Unix()
+
+	// Insert 100 locally authored pending messages
+	var localMsgIDs [][]byte
+	for i := 0; i < 100; i++ {
+		id := []byte(fmt.Sprintf("local-msg-%04d", i))
+		localMsgIDs = append(localMsgIDs, id)
+		msg := &Message{
+			ID:              id,
+			Src:             localID,
+			Dst:             bytes.Repeat([]byte{0xBB}, 32),
+			Payload:         []byte("local important payload"),
+			CopiesRemaining: 4,
+			TTLSeconds:      86400,
+			HopCount:        0,
+			CreatedAt:       now - int64(1000-i), // old timestamps
+			Status:          StatusPending,
+		}
+		if err := store.SaveMessage(msg); err != nil {
+			t.Fatalf("SaveMessage local failed: %v", err)
+		}
+	}
+
+	// Insert 450 transit relay messages across diverse destinations (total = 550 > 500 max cap)
+	remoteSrc := bytes.Repeat([]byte{0xCC}, 32)
+	for i := 0; i < 450; i++ {
+		id := []byte(fmt.Sprintf("relay-msg-%04d", i))
+		dst := []byte(fmt.Sprintf("dest-%04d-padding-to-32-bytes-000", i/10)) // 10 msgs per dest (< 50 quota)
+		msg := &Message{
+			ID:              id,
+			Src:             remoteSrc,
+			Dst:             dst,
+			Payload:         []byte("transit relay payload"),
+			CopiesRemaining: 2,
+			TTLSeconds:      86400,
+			HopCount:        1,
+			CreatedAt:       now - int64(500-i),
+			Status:          StatusSprayed,
+		}
+		if err := store.SaveMessage(msg); err != nil {
+			t.Fatalf("SaveMessage relay failed: %v", err)
+		}
+	}
+
+	if count := store.MessageCount(); count != 550 {
+		t.Fatalf("initial message count: got %d, want 550", count)
+	}
+
+	// Run PruneIfNeeded
+	if err := store.PruneIfNeeded(); err != nil {
+		t.Fatalf("PruneIfNeeded failed: %v", err)
+	}
+
+	// Post-prune count must be pruned down to 400
+	newCount := store.MessageCount()
+	if newCount > 400 {
+		t.Errorf("post-prune message count %d > 400 prune target", newCount)
+	}
+
+	// CRITICAL INVARIANT: ALL 100 locally authored pending messages MUST still exist
+	for idx, id := range localMsgIDs {
+		msg, err := store.GetMessage(id)
+		if err != nil || msg == nil {
+			t.Fatalf("VIOLATION: locally authored unsent message #%d (%s) was evicted during prune!", idx, string(id))
+		}
+	}
+}
+
+func TestMaxMessagesPerDstQuota(t *testing.T) {
+	store, err := OpenStore(tempDBPath(t))
+	if err != nil {
+		t.Fatalf("OpenStore failed: %v", err)
+	}
+	defer store.Close()
+
+	localID := bytes.Repeat([]byte{0x11}, 32)
+	store.SetLocalID(localID)
+	now := time.Now().Unix()
+
+	targetDst := bytes.Repeat([]byte{0x99}, 32)
+	remoteSrc := bytes.Repeat([]byte{0x22}, 32)
+
+	// Save 55 relay messages for targetDst
+	for i := 0; i < 55; i++ {
+		id := []byte(string(rune(3000+i)) + "-flood-msg")
+		msg := &Message{
+			ID:              id,
+			Src:             remoteSrc,
+			Dst:             targetDst,
+			Payload:         []byte("spam payload"),
+			CopiesRemaining: 2,
+			TTLSeconds:      86400,
+			HopCount:        1,
+			CreatedAt:       now + int64(i),
+			Status:          StatusSprayed,
+		}
+		if err := store.SaveMessage(msg); err != nil {
+			t.Fatalf("SaveMessage flood failed: %v", err)
+		}
+	}
+
+	// Messages for targetDst must be capped at 50
+	dstMsgs, err := store.GetMessagesForDst(targetDst)
+	if err != nil {
+		t.Fatalf("GetMessagesForDst failed: %v", err)
+	}
+	if len(dstMsgs) > 50 {
+		t.Errorf("destination flood quota exceeded: got %d messages, want <= 50", len(dstMsgs))
+	}
+}
+
+func TestStoreCorruptionRecovery(t *testing.T) {
+	corruptPath := tempDBPath(t)
+	// Write corrupted garbage bytes into the database file
+	if err := os.WriteFile(corruptPath, []byte("NOT_A_VALID_BOLTDB_HEADER_GARBAGE_BYTES_0123456789"), 0600); err != nil {
+		t.Fatalf("failed to write corrupt file: %v", err)
+	}
+
+	// OpenStore must recover automatically without returning an error
+	store, err := OpenStore(corruptPath)
+	if err != nil {
+		t.Fatalf("OpenStore failed to recover from corrupted file: %v", err)
+	}
+	defer store.Close()
+
+	// Verify we can read and write to the recovered store
+	msg := &Message{
+		ID:              bytes.Repeat([]byte{0x77}, 32),
+		Src:             bytes.Repeat([]byte{0x11}, 32),
+		Dst:             bytes.Repeat([]byte{0x22}, 32),
+		Payload:         []byte("recovered message"),
+		CopiesRemaining: 4,
+		TTLSeconds:      3600,
+		CreatedAt:       time.Now().Unix(),
+		Status:          StatusPending,
+	}
+	if err := store.SaveMessage(msg); err != nil {
+		t.Fatalf("SaveMessage on recovered store failed: %v", err)
+	}
+
+	retrieved, err := store.GetMessage(msg.ID)
+	if err != nil {
+		t.Fatalf("GetMessage on recovered store failed: %v", err)
+	}
+	if !bytes.Equal(retrieved.Payload, msg.Payload) {
+		t.Errorf("payload mismatch in recovered store: got %s, want %s", string(retrieved.Payload), string(msg.Payload))
 	}
 }

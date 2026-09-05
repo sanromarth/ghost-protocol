@@ -52,6 +52,33 @@ import com.ghostprotocol.util.NotificationHelper
 
 class GhostService : Service() {
 
+    // v0.3.8: Queued outbound verification payloads for contacts scanned before peer BLE discovery
+    data class PendingVerification(
+        val contactId: String,
+        val contactEd25519PubFp: ByteArray,
+        val ciphertext: ByteArray,
+        val timestamp: Long = System.currentTimeMillis()
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (javaClass != other?.javaClass) return false
+            other as PendingVerification
+            if (contactId != other.contactId) return false
+            if (!contactEd25519PubFp.contentEquals(other.contactEd25519PubFp)) return false
+            if (!ciphertext.contentEquals(other.ciphertext)) return false
+            if (timestamp != other.timestamp) return false
+            return true
+        }
+
+        override fun hashCode(): Int {
+            var result = contactId.hashCode()
+            result = 31 * result + contactEd25519PubFp.contentHashCode()
+            result = 31 * result + ciphertext.contentHashCode()
+            result = 31 * result + timestamp.hashCode()
+            return result
+        }
+    }
+
     companion object {
         // TODO(v0.3): Use bound service + Messenger instead of static StateFlow
         private val _currentPowerPolicy = MutableStateFlow(PowerPolicyEngine.DEFAULT_ECO_POLICY)
@@ -59,6 +86,8 @@ class GhostService : Service() {
 
         // In-memory cache for verification packets received before contact QR is scanned
         val pendingVerifications = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+        val pendingOutboundVerifications = java.util.concurrent.ConcurrentHashMap<String, PendingVerification>()
 
         @Volatile
         var activeGroupSender: GroupMessageSender? = null
@@ -74,6 +103,10 @@ class GhostService : Service() {
     private val TAG = "GHOST_BLE"
     private var ghostRouter: GhostRouter? = null
     private var wakeLock: PowerManager.WakeLock? = null
+
+    // v0.3.8: Group reflush debounce map (minimum 10s between reflushes per group)
+    private val lastGroupReflush = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val GROUP_REFLUSH_DEBOUNCE_MS = 10_000L
 
     // v0.2/v0.3/v0.3.7: Power policy, security posture, discovery, short code, telemetry, group, and delivery receipts
     private lateinit var powerPolicyEngine: PowerPolicyEngine
@@ -414,6 +447,10 @@ class GhostService : Service() {
                     // only transient message rows are pruned to protect flash storage.
                     val cutoff = System.currentTimeMillis() - 48 * 60 * 60 * 1000L
                     GhostDatabase.getInstance(applicationContext).groupMessageDao().pruneOlderThan(cutoff)
+
+                    // v0.3.8: Prune stale pending outbound verifications (> 5 minutes)
+                    val cutoffVerif = System.currentTimeMillis() - 300_000L
+                    pendingOutboundVerifications.entries.removeIf { it.value.timestamp < cutoffVerif }
                 } catch (e: Exception) {
                     Log.e(TAG, ">>> Telemetry / pruning error: ${e.message}")
                 }
@@ -550,6 +587,10 @@ class GhostService : Service() {
             } else if (ciphertext[0] == GroupProtocol.OPCODE_GROUP_ENVELOPE) {
                 Log.d(TAG, "GHOST_GROUP: Received routed group message envelope (0x30)")
                 groupMessageReceiver.onGroupMessageReceived(ciphertext)
+                return
+            } else if (ciphertext[0] == GroupProtocol.OPCODE_GROUP_INVITE) {
+                Log.d(TAG, "GHOST_GROUP: Received routed group invite envelope (0x31)")
+                groupMessageReceiver.onGroupInviteReceived(ciphertext)
                 return
             } else if (ciphertext[0] == ShortCodeProtocol.OPCODE_MESH_QUERY) {
                 Log.d(TAG, "GHOST_SHORTCODE: Received mesh-routed short code query (0x22)")
@@ -705,11 +746,11 @@ class GhostService : Service() {
             // MUST be outside collectLatest so it persists across emissions
             val lastRouterCall = mutableMapOf<String, Long>()
 
-            BleManager.peers.collectLatest { peers ->
-                if (peers.isEmpty()) return@collectLatest
+            BleManager.peers.collect { peers ->
+                if (peers.isEmpty()) return@collect
 
                 val contacts = contactDao.getAllOnce()
-                if (contacts.isEmpty()) return@collectLatest
+                if (contacts.isEmpty()) return@collect
 
                 val contactFingerprints = mutableMapOf<String, String>()
                 for (contact in contacts) {
@@ -737,6 +778,15 @@ class GhostService : Service() {
                     if (existingContact.bleAddress != peer.address) {
                         Log.d(TAG, ">>> MATCH: peer ${peer.address} fingerprint=$peerFpHex → contact '${existingContact.name}' (${existingContact.id})")
                         contactDao.updateBleAddress(matchedContactId, peer.address)
+                    }
+
+                    // v0.3.8: Dispatch any pending outbound verification queued before peer was discovered
+                    val pendingVerif = pendingOutboundVerifications.remove(matchedContactId)
+                    if (pendingVerif != null) {
+                        Log.d(TAG, ">>> Dispatching queued outbound verification to ${existingContact.name} (${peer.address})")
+                        BleManager.sendMessage(peer.address, pendingVerif.ciphertext) { success ->
+                            Log.d(TAG, ">>> Queued verification delivery to ${existingContact.name}: $success")
+                        }
                     }
 
                     // Update last encounter time for policy engine
@@ -851,14 +901,21 @@ class GhostService : Service() {
                     }
                 }
 
-                // v0.3.5: Re-flush pending group messages on peer encounters
-                try {
-                    val activeGroups = db.groupDao().getAllActiveOnce()
-                    for (g in activeGroups) {
-                        groupMessageSender.reflushPendingGroupMessages(g.groupId)
+                // v0.3.5 / v0.3.8: Re-flush pending group messages on peer encounters (debounced child job)
+                serviceScope.launch(Dispatchers.IO) {
+                    try {
+                        val nowMs = System.currentTimeMillis()
+                        val activeGroups = db.groupDao().getAllActiveOnce()
+                        for (g in activeGroups) {
+                            val lastReflush = lastGroupReflush[g.groupId] ?: 0L
+                            if (nowMs - lastReflush >= GROUP_REFLUSH_DEBOUNCE_MS) {
+                                lastGroupReflush[g.groupId] = nowMs
+                                groupMessageSender.reflushPendingGroupMessages(g.groupId)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "GHOST_GROUP: Error reflushing group messages: ${e.message}")
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "GHOST_GROUP: Error reflushing group messages: ${e.message}")
                 }
             }
         }
@@ -930,6 +987,10 @@ class GhostService : Service() {
             } else if (data[0] == GroupProtocol.OPCODE_GROUP_ENVELOPE) {
                 Log.d(TAG, "GHOST_GROUP: Direct received group message envelope (0x30)")
                 groupMessageReceiver.onGroupMessageReceived(data)
+                return
+            } else if (data[0] == GroupProtocol.OPCODE_GROUP_INVITE) {
+                Log.d(TAG, "GHOST_GROUP: Direct received group invite envelope (0x31)")
+                groupMessageReceiver.onGroupInviteReceived(data)
                 return
             } else if (data[0] == ShortCodeProtocol.OPCODE_MESH_QUERY) {
                 Log.d(TAG, "GHOST_SHORTCODE: Direct received mesh-routed short code query (0x22)")
@@ -1087,6 +1148,15 @@ class GhostService : Service() {
                     BleManager.sendMessage(targetAddress, ciphertext) { success ->
                         Log.d(TAG, ">>> VERIFICATION PAYLOAD to ${contact.name} ($targetAddress): $success")
                     }
+                } else {
+                    val contactPub = Base64.decode(contact.ed25519PubKey.trim(), Base64.DEFAULT)
+                    val fp = MessageDigest.getInstance("SHA-256").digest(contactPub).copyOfRange(0, 4)
+                    pendingOutboundVerifications[contact.id] = PendingVerification(
+                        contactId = contact.id,
+                        contactEd25519PubFp = fp,
+                        ciphertext = ciphertext
+                    )
+                    Log.d(TAG, ">>> Peer ${contact.name} not yet visible in BLE scan; queued outbound verification")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, ">>> Error sending verification payload: ${e.message}")

@@ -31,7 +31,7 @@ data class PosturePolicy(
     val securityPosture: SecurityPosture
 )
 
-class PowerPolicyEngine(private val context: Context) {
+class PowerPolicyEngine(private val context: Context? = null) {
 
     private val _currentPolicy = MutableStateFlow(DEFAULT_ECO_POLICY)
     val currentPolicy: StateFlow<PowerPolicy> = _currentPolicy.asStateFlow()
@@ -39,6 +39,11 @@ class PowerPolicyEngine(private val context: Context) {
     // Manual override state
     private var overrideMode: PowerMode? = null
     private var overrideExpiresAt: Long = 0L
+
+    // Battery threshold hysteresis: enter critical at <20%, exit only at >=22% (or when charging)
+    private var isCriticalBatteryState = false
+
+    fun isCriticalBattery(): Boolean = isCriticalBatteryState
 
     /**
      * Force a specific power mode for the given duration.
@@ -96,13 +101,26 @@ class PowerPolicyEngine(private val context: Context) {
         isMoving: Boolean?,
         securityPosture: SecurityPosture = SecurityPosture.STEALTH
     ): PowerPolicy {
+        // Update hysteresis state
+        if (isCharging) {
+            isCriticalBatteryState = false
+        } else if (isCriticalBatteryState) {
+            if (batteryPercent >= 22) {
+                isCriticalBatteryState = false
+            }
+        } else {
+            if (batteryPercent < 20) {
+                isCriticalBatteryState = true
+            }
+        }
+
         val policy = when (securityPosture) {
             SecurityPosture.PROTEST -> PowerPolicy(
                 scanIntervalMs = 600L,
                 scanWindowMs = 300L,
                 advertiseIntervalMs = 100L,
                 txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_HIGH,
-                relayWillingness = 1.0f,
+                relayWillingness = if (!isCharging && batteryPercent < 20) 0.0f else 1.0f,
                 maxBatchSize = 10,
                 wakeLockRequired = true,
                 mode = PowerMode.ACTIVE,
@@ -113,7 +131,7 @@ class PowerPolicyEngine(private val context: Context) {
                 scanWindowMs = 300L,
                 advertiseIntervalMs = 100L,
                 txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_HIGH,
-                relayWillingness = 1.0f,
+                relayWillingness = if (!isCharging && batteryPercent < 20) 0.0f else 1.0f,
                 maxBatchSize = 10,
                 wakeLockRequired = true,
                 mode = PowerMode.ACTIVE,
@@ -131,8 +149,16 @@ class PowerPolicyEngine(private val context: Context) {
                 }.copy(securityPosture = SecurityPosture.STEALTH)
             }
         }
-        _currentPolicy.value = policy
-        return policy
+
+        // Low-battery relay protection invariant: battery < 20% and not charging -> relay willingness MUST be 0.0f
+        val finalPolicy = if (!isCharging && batteryPercent < 20) {
+            policy.copy(relayWillingness = 0.0f)
+        } else {
+            policy
+        }
+
+        _currentPolicy.value = finalPolicy
+        return finalPolicy
     }
 
     /**
@@ -165,8 +191,21 @@ class PowerPolicyEngine(private val context: Context) {
         isMoving: Boolean?
     ): PowerPolicy {
         return when {
-            // DEEP_SLEEP: no motion, no recent peers, screen off, not charging
-            batteryPercent > 20
+            // CRITICAL: battery dying (hysteresis controlled)
+            isCriticalBatteryState ->
+                PowerPolicy(
+                    scanIntervalMs = 60_000L,
+                    scanWindowMs = 200L,
+                    advertiseIntervalMs = 1000L,
+                    txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_LOW,
+                    relayWillingness = 0.0f,
+                    maxBatchSize = 1,
+                    wakeLockRequired = false,
+                    mode = PowerMode.CRITICAL
+                )
+
+            // DEEP_SLEEP: no motion, no recent peers, screen off, not charging, not critical
+            !isCriticalBatteryState
                 && !isCharging
                 && !screenOn
                 && peerCount == 0
@@ -181,19 +220,6 @@ class PowerPolicyEngine(private val context: Context) {
                     maxBatchSize = 1,
                     wakeLockRequired = false,
                     mode = PowerMode.DEEP_SLEEP
-                )
-
-            // CRITICAL: battery dying
-            batteryPercent < 20 && !isCharging ->
-                PowerPolicy(
-                    scanIntervalMs = 60_000L,
-                    scanWindowMs = 200L,
-                    advertiseIntervalMs = 1000L,
-                    txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_LOW,
-                    relayWillingness = 0.0f,
-                    maxBatchSize = 1,
-                    wakeLockRequired = false,
-                    mode = PowerMode.CRITICAL
                 )
 
             // ACTIVE: charging OR in dense crowd with recent traffic

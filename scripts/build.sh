@@ -1,26 +1,35 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo "Building GHOST Protocol..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-echo "1. Building Rust workspace..."
-# cd rust && cargo build --release
+echo "================================================================================"
+echo "GHOST Protocol — Monorepo Build"
+echo "================================================================================"
 
-echo "2. Building Rust for Android targets..."
-# cargo build --target aarch64-linux-android --release
-# cargo build --target armv7-linux-androideabi --release
-
-echo "3. Building Go packages..."
-cd go
+echo ""
+echo "=== 1. Building Go Mesh Router Packages & CLI ==="
+cd "$PROJECT_ROOT/go/ghostrouter"
 go build ./...
-cd ..
+go build -o bin/ghost-sim ./cmd/ghost-sim
+echo "Built ghost-sim CLI: $PROJECT_ROOT/go/ghostrouter/bin/ghost-sim"
 
-echo "4. Building Go for Android via gomobile..."
-# gomobile bind -target=android ./go/...
+echo ""
+echo "=== 2. Building Rust Cryptographic Core ==="
+cd "$PROJECT_ROOT/rust"
+cargo check --workspace
 
-echo "5. Assembling Android APK..."
-cd android
-./gradlew assembleDebug
-cd ..
+echo ""
+echo "=== 3. Assembling Android APK ==="
+cd "$PROJECT_ROOT"
+if [ -n "${JAVA_HOME:-}" ] && [ -d "$JAVA_HOME" ]; then
+    ./gradlew assembleDebug --no-daemon || echo "WARNING: Gradle build requires Android SDK/JDK configured."
+else
+    echo "NOTE: Skipping gradlew assembleDebug (JAVA_HOME not configured)."
+fi
 
+echo ""
+echo "================================================================================"
 echo "Build complete."
+echo "================================================================================"

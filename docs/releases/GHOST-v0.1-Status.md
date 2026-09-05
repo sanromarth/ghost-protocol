@@ -76,7 +76,7 @@ A minimal offline mesh messenger for Android. Two phones discover each other ove
 v0.1.5 went through 10 rounds of bug hunting. Here's what got fixed:
 - **Audit Results**: 73 bugs found, 67 fixed, 0 false positives.
 - **Go Router**: Fixed severe deadlocks (mutex held across JNI callbacks), direct-send messages being incorrectly re-sprayed across the mesh, spray-to-sender relay loops in `OnPeerDiscovered`, message ID collisions on rapid sends (resolved with `crypto/rand` nonces), unsafe slice bounds in log statements (12 locations fixed), BoltDB 1-nanosecond timeout lock contention, BoltDB `PruneIfNeeded` catastrophic wipeouts, serializer integer overflows, double-stop panics (fixed with `sync.Once`), and `OnDeliver` passing dst instead of src.
-- **BLE Transport**: Fixed GATT server responding `SUCCESS` on dropped messages, added GATT client 10-second connection timeouts, fixed concurrent GATT connections causing error 133, and fixed BLE scan fingerprint erasure. 
+- **BLE Transport**: Fixed GATT server responding `SUCCESS` on dropped messages, added GATT client 10-second connection timeouts, fixed concurrent GATT connections causing error 133, and fixed BLE scan fingerprint erasure.
 - **Kotlin App & UI**: Added `POST_NOTIFICATIONS` runtime permission for Android 13+, fixed permission denial blocking the entire BLE service, added Room database indexes for query performance, fixed `SwipeableMessage` stale lambda capture in `LazyColumn`, reduced aggressive dedup window from 30s to 5s, fixed `IdentityManager` `SharedPreferences` corruption crashes, and fixed direct-send messages being silently lost when `bleAddress` was null.
 - **Rust Crypto**: Fixed `unwrap` panics across the FFI boundary and added proper input validation.
 

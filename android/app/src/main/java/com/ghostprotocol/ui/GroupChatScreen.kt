@@ -17,6 +17,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -150,37 +151,53 @@ fun GroupChatScreen(
                 .padding(paddingValues)
         ) {
             // Message List
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = GhostTheme.SpaceMd),
-                contentPadding = PaddingValues(vertical = GhostTheme.SpaceSm)
-            ) {
-                items(messages, key = { it.id }) { message ->
-                    val isOutgoing = message.senderContactId == myContactId
-                    val senderName = if (isOutgoing) {
-                        "You"
-                    } else {
-                        contactsMap[message.senderContactId]?.name ?: "Peer ${message.senderContactId.take(4)}"
-                    }
-
-                    val totalOther = (memberCount - 1).coerceAtLeast(1)
-
-                    GroupMessageBubble(
-                        message = message,
-                        senderName = senderName,
-                        isOutgoing = isOutgoing,
-                        totalOtherMembers = totalOther,
-                        onLongClick = {
-                            replyTo = Pair(senderName, message.text)
-                        },
-                        onDeliveryStatusClick = {
-                            deliveryDetailMessage = message
-                        }
+            if (messages.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(GhostTheme.SpaceLg),
+                    contentAlignment = Alignment.Center
+                ) {
+                    GhostEmptyState(
+                        icon = Icons.Default.Lock,
+                        title = "Encrypted Cell Group",
+                        subtitle = "Messages sent to this cell are encrypted individually for each member and routed across the peer-to-peer mesh."
                     )
-                    Spacer(modifier = Modifier.height(GhostTheme.SpaceSm))
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = GhostTheme.SpaceMd),
+                    contentPadding = PaddingValues(vertical = GhostTheme.SpaceSm)
+                ) {
+                    items(messages, key = { it.id }) { message ->
+                        val isOutgoing = message.senderContactId == myContactId
+                        val senderName = if (isOutgoing) {
+                            "You"
+                        } else {
+                            contactsMap[message.senderContactId]?.name ?: "Peer ${message.senderContactId.take(4)}"
+                        }
+
+                        val totalOther = (memberCount - 1).coerceAtLeast(1)
+
+                        GroupMessageBubble(
+                            message = message,
+                            senderName = senderName,
+                            isOutgoing = isOutgoing,
+                            totalOtherMembers = totalOther,
+                            onLongClick = {
+                                replyTo = Pair(senderName, message.text)
+                            },
+                            onDeliveryStatusClick = {
+                                deliveryDetailMessage = message
+                            }
+                        )
+                        Spacer(modifier = Modifier.height(GhostTheme.SpaceSm))
+                    }
                 }
             }
 
@@ -275,7 +292,7 @@ fun GroupChatScreen(
                     },
                     enabled = canSend,
                     modifier = Modifier
-                        .size(44.dp)
+                        .size(GhostTheme.MinTouchTarget)
                         .clip(CircleShape)
                         .background(if (canSend) GhostTheme.Purple else GhostTheme.Surface2)
                 ) {
@@ -323,18 +340,6 @@ private fun GroupMessageBubble(
 ) {
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
     val timeStr = remember(message.timestamp) { timeFormat.format(Date(message.timestamp)) }
-
-    // Violet shimmer border animation for STATUS_SPRAYED
-    val infiniteTransition = rememberInfiniteTransition(label = "shimmer")
-    val shimmerAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
-        targetValue = 1.0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "shimmerAlpha"
-    )
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -385,12 +390,7 @@ private fun GroupMessageBubble(
                         if (isSprayed) {
                             Modifier.border(
                                 width = 1.dp,
-                                brush = Brush.linearGradient(
-                                    listOf(
-                                        GhostTheme.PurpleLight.copy(alpha = shimmerAlpha),
-                                        GhostTheme.Purple.copy(alpha = shimmerAlpha * 0.5f)
-                                    )
-                                ),
+                                brush = GhostTheme.SprayedBorder,
                                 shape = RoundedCornerShape(
                                     topStart = GhostTheme.RadiusBubble,
                                     topEnd = GhostTheme.RadiusBubble,

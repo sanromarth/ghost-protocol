@@ -1,5 +1,6 @@
 # Build outputs
 build/
+**/build/
 *.apk
 *.aab
 *.ap_
@@ -17,11 +18,14 @@ captures/
 
 # Rust
 rust/target/
+**/target/
 **/*.rs.bk
 
 # Go
 go/bin/
 go/pkg/
+go/ghostrouter/bin/
+**/bin/
 
 # Native libs (rebuilt from source)
 *.so
@@ -33,5 +37,6 @@ Thumbs.db
 *.swp
 *~
 
-# Logs
+# Logs & temporaries
 *.log
+*.tmp

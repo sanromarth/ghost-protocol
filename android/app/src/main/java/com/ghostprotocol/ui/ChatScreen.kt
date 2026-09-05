@@ -61,210 +61,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
-// ======================== ViewModel ========================
-
-class ChatViewModel(application: Application, private val contactId: String) : AndroidViewModel(application) {
-    private val db = GhostDatabase.getInstance(application)
-    private val contactDao = db.contactDao()
-    private val messageDao = db.messageDao()
-
-    private val _contact = MutableStateFlow<Contact?>(null)
-    val contact: StateFlow<Contact?> = _contact
-
-    private val _isSending = MutableStateFlow(false)
-    val isSending: StateFlow<Boolean> = _isSending
-
-    val messages: StateFlow<List<MessageEntity>> = messageDao.getForContact(contactId)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    init {
-        viewModelScope.launch(Dispatchers.IO) {
-            _contact.value = contactDao.getById(contactId)
-        }
-    }
-
-    fun sendMessage(
-        text: String,
-        replyTo: MessageEntity? = null,
-        replySenderName: String? = null
-    ) {
-        viewModelScope.launch(Dispatchers.IO) {
-            // Re-entrancy guard: prevent duplicate sends on rapid taps
-            if (!_isSending.compareAndSet(false, true)) return@launch
-            var messageId: String? = null
-            try {
-                val freshContact = contactDao.getById(contactId) ?: return@launch
-                _contact.value = freshContact
-
-                val myEd25519PubKey = IdentityManager.getEd25519PubKey()
-                val myName = IdentityManager.getDisplayName()
-                val timestamp = System.currentTimeMillis()
-                val myContactId = IdentityManager.getContactId()
-                val contentHash = DeliveryReceiptProtocol.computeMessageHash(
-                    senderContactId = myContactId,
-                    timestamp = timestamp,
-                    plaintext = text
-                )
-
-                // Wire format with TS token:
-                // Normal: senderName\u0000TS\u0000timestamp\u0000message
-                // Reply:  senderName\u0000TS\u0000timestamp\u0000REPLY\u0000quotedSender\u0000quotedText\u0000message
-                val plaintextBytes = if (replyTo != null) {
-                    val quotedSender = if (replyTo.isOutgoing) "You" else (replySenderName ?: "Contact")
-                    val quotedText = replyTo.content.take(120)
-                    (myName + "\u0000TS\u0000" + timestamp + "\u0000REPLY\u0000" + quotedSender + "\u0000" + quotedText + "\u0000" + text).toByteArray(Charsets.UTF_8)
-                } else {
-                    (myName + "\u0000TS\u0000" + timestamp + "\u0000" + text).toByteArray(Charsets.UTF_8)
-                }
-
-                val payload = myEd25519PubKey + plaintextBytes
-                val signature = GhostCrypto.sign(IdentityManager.getEd25519Seed(), payload)
-                val fullPayload = payload + signature
-                val contactX25519Pub = Base64.decode(freshContact.x25519PubKey, Base64.NO_WRAP)
-                val ciphertext = GhostCrypto.encrypt(contactX25519Pub, fullPayload)
-
-                val message = MessageEntity(
-                    id = UUID.randomUUID().toString(),
-                    contactId = contactId,
-                    content = text,
-                    isOutgoing = true,
-                    timestamp = timestamp,
-                    isVerified = true,
-                    status = MessageEntity.STATUS_PENDING,
-                    replyToId = replyTo?.id,
-                    replyToSender = if (replyTo != null) (if (replyTo.isOutgoing) "You" else (replySenderName ?: "Contact")) else null,
-                    replyToText = replyTo?.content?.take(120),
-                    contentHash = contentHash
-                )
-                messageId = message.id
-                messageDao.insert(message)
-
-                val contactEd25519Pub = Base64.decode(freshContact.ed25519PubKey, Base64.NO_WRAP)
-                val dstId = java.security.MessageDigest.getInstance("SHA-256").digest(contactEd25519Pub)
-
-                val router = BleManager.getRouter()
-                if (router != null) {
-                    val (isDirect, blob) = router.sendMessage(dstId, ciphertext)
-                    if (isDirect && blob != null && freshContact.bleAddress != null) {
-                        BleManager.sendMessage(freshContact.bleAddress, blob) { success ->
-                            viewModelScope.launch(Dispatchers.IO) {
-                                if (success) {
-                                    messageDao.updateStatus(message.id, MessageEntity.STATUS_SENT)
-                                } else {
-                                    // Direct send failed (peer disconnected, screen off, or out of range)
-                                    // Hold as SPRAYED in Room (already queued in Go router on line 135 for spray delivery)
-                                    messageDao.updateStatus(message.id, MessageEntity.STATUS_SPRAYED)
-                                }
-                            }
-                        }
-                    } else {
-                        // Peer offline or no direct BLE address — queued in mesh router
-                        messageDao.updateStatus(message.id, MessageEntity.STATUS_SPRAYED)
-                    }
-                } else if (freshContact.bleAddress != null) {
-                    BleManager.sendMessage(freshContact.bleAddress, ciphertext) { success ->
-                        viewModelScope.launch(Dispatchers.IO) {
-                            messageDao.updateStatus(
-                                message.id,
-                                if (success) MessageEntity.STATUS_SENT else MessageEntity.STATUS_SPRAYED
-                            )
-                        }
-                    }
-                } else {
-                    messageDao.updateStatus(message.id, MessageEntity.STATUS_SPRAYED)
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                // Don't leave message spinning forever — mark as SPRAYED to allow DTN delivery
-                messageId?.let { id ->
-                    try { messageDao.updateStatus(id, MessageEntity.STATUS_SPRAYED) } catch (_: Exception) {}
-                }
-            } finally {
-                _isSending.value = false
-            }
-        }
-    }
-
-    fun deleteMessage(messageId: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            messageDao.deleteById(messageId)
-        }
-    }
-
-    fun clearChat() {
-        viewModelScope.launch(Dispatchers.IO) {
-            messageDao.deleteForContact(contactId)
-        }
-    }
-
-    fun deleteContact(onDeleted: () -> Unit) {
-        viewModelScope.launch(Dispatchers.IO) {
-            messageDao.deleteForContact(contactId)
-            contactDao.getById(contactId)?.let { contactDao.delete(it) }
-            withContext(Dispatchers.Main) {
-                onDeleted()
-            }
-        }
-    }
-
-    fun retryMessage(message: MessageEntity) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val freshContact = contactDao.getById(contactId) ?: return@launch
-            messageDao.updateStatus(message.id, MessageEntity.STATUS_PENDING)
-            try {
-                val contactX25519Pub = Base64.decode(freshContact.x25519PubKey, Base64.NO_WRAP)
-                val myEd25519PubKey = IdentityManager.getEd25519PubKey()
-                val myName = IdentityManager.getDisplayName()
-                val plaintextBytes = (myName + "\u0000TS\u0000" + message.timestamp + "\u0000" + message.content).toByteArray(Charsets.UTF_8)
-                val payload = myEd25519PubKey + plaintextBytes
-                val signature = GhostCrypto.sign(IdentityManager.getEd25519Seed(), payload)
-                val fullPayload = payload + signature
-                val ciphertext = GhostCrypto.encrypt(contactX25519Pub, fullPayload)
-
-                val contactEd25519Pub = Base64.decode(freshContact.ed25519PubKey, Base64.NO_WRAP)
-                val dstId = java.security.MessageDigest.getInstance("SHA-256").digest(contactEd25519Pub)
-
-                val router = BleManager.getRouter()
-                if (router != null) {
-                    val (isDirect, blob) = router.sendMessage(dstId, ciphertext)
-                    if (isDirect && blob != null && freshContact.bleAddress != null) {
-                        BleManager.sendMessage(freshContact.bleAddress, blob) { success ->
-                            viewModelScope.launch(Dispatchers.IO) {
-                                messageDao.updateStatus(
-                                    message.id,
-                                    if (success) MessageEntity.STATUS_SENT else MessageEntity.STATUS_SPRAYED
-                                )
-                            }
-                        }
-                    } else {
-                        messageDao.updateStatus(message.id, MessageEntity.STATUS_SPRAYED)
-                    }
-                } else if (freshContact.bleAddress != null) {
-                    BleManager.sendMessage(freshContact.bleAddress, ciphertext) { success ->
-                        viewModelScope.launch(Dispatchers.IO) {
-                            messageDao.updateStatus(message.id, if (success) MessageEntity.STATUS_SENT else MessageEntity.STATUS_SPRAYED)
-                        }
-                    }
-                } else {
-                    messageDao.updateStatus(message.id, MessageEntity.STATUS_SPRAYED)
-                }
-            } catch (e: Exception) {
-                messageDao.updateStatus(message.id, MessageEntity.STATUS_SPRAYED)
-            }
-        }
-    }
-}
-
-class ChatViewModelFactory(private val application: Application, private val contactId: String) : ViewModelProvider.Factory {
-    override fun <T : ViewModel> create(modelClass: Class<T>): T {
-        if (modelClass.isAssignableFrom(ChatViewModel::class.java)) {
-            @Suppress("UNCHECKED_CAST")
-            return ChatViewModel(application, contactId) as T
-        }
-        throw IllegalArgumentException("Unknown ViewModel class")
-    }
-}
-
 // ======================== Chat Screen ========================
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -281,13 +77,17 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
     val snackbarHostState = remember { SnackbarHostState() }
     val clipboardManager: ClipboardManager = LocalClipboardManager.current
     val T = GhostTheme
-    var currentTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            kotlinx.coroutines.delay(1_000L)
-            currentTime = System.currentTimeMillis()
+    val blePeers by BleManager.peers.collectAsStateWithLifecycle(initialValue = emptyList())
+    val matchedPeer = remember(contact, blePeers) {
+        contact?.let { c ->
+            val cFpHex = c.id.take(8)
+            blePeers.find { peer ->
+                (c.bleAddress != null && peer.address == c.bleAddress) ||
+                (peer.fingerprint != null && cFpHex.startsWith(peer.fingerprint.take(4).joinToString("") { "%02x".format(it) }))
+            }?.takeIf { System.currentTimeMillis() - it.lastSeen < BleManager.PEER_OFFLINE_TIMEOUT_MS }
         }
     }
+    val isOnline = matchedPeer != null
 
     // Reply mode
     var replyToMessage by remember { mutableStateOf<MessageEntity?>(null) }
@@ -319,7 +119,7 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
         containerColor = T.Surface0,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            // Premium app bar
+            // Clean edge-to-edge top bar with progressive header disclosure
             Surface(
                 color = T.Surface0,
                 tonalElevation = 0.dp
@@ -328,10 +128,13 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                     modifier = Modifier
                         .fillMaxWidth()
                         .statusBarsPadding()
-                        .padding(horizontal = 4.dp, vertical = 8.dp),
+                        .padding(horizontal = 4.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(onClick = { navController.popBackStack() }) {
+                    IconButton(
+                        onClick = { navController.popBackStack() },
+                        modifier = Modifier.size(T.MinTouchTarget)
+                    ) {
                         Icon(
                             Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Back",
@@ -339,69 +142,49 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
                         )
                     }
 
-                    val blePeers by BleManager.peers.collectAsState()
-                    val matchedPeer = contact?.let { c ->
-                        blePeers.find { peer ->
-                            val matchesAddress = c.bleAddress != null && peer.address == c.bleAddress
-                            val matchesFp = peer.fingerprint != null && try {
-                                val contactFp = java.security.MessageDigest.getInstance("SHA-256")
-                                    .digest(Base64.decode(c.ed25519PubKey, Base64.NO_WRAP))
-                                    .copyOfRange(0, 4)
-                                peer.fingerprint.contentEquals(contactFp)
-                            } catch (_: Exception) { false }
-                            (matchesAddress || matchesFp) && (currentTime - peer.lastSeen < BleManager.PEER_OFFLINE_TIMEOUT_MS)
-                        }
-                    }
-                    val isOnline = matchedPeer != null
-
-                    // Avatar with Ghost Aura / Ethereal Ring — tap for contact info
-                    if (contact != null) {
-                        val ed25519Bytes = remember(contact!!.ed25519PubKey) {
-                            try { Base64.decode(contact!!.ed25519PubKey, Base64.NO_WRAP) } catch (_: Exception) { null }
-                        }
-                        GhostAvatar(
-                            pubkey = ed25519Bytes,
-                            name = contact!!.name,
-                            size = T.AvatarSmall,
-                            isMutuallyVerified = isMutuallyVerified,
-                            onClick = { showContactInfo = true }
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                    }
-
-                    Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                contact?.name ?: "Chat",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 18.sp,
-                                color = T.TextPrimary
+                    // Tapping the header triggers progressive disclosure of contact security details
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { showContactInfo = true }
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (contact != null) {
+                            val ed25519Bytes = remember(contact!!.ed25519PubKey) {
+                                try { Base64.decode(contact!!.ed25519PubKey, Base64.NO_WRAP) } catch (_: Exception) { null }
+                            }
+                            GhostAvatar(
+                                pubkey = ed25519Bytes,
+                                name = contact!!.name,
+                                size = T.AvatarSmall,
+                                isMutuallyVerified = isMutuallyVerified,
+                                animateEtherealRing = true
                             )
-                            if (contact?.isIntroduced == true && !isMutuallyVerified) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .border(1.dp, Color(0xFF3F3F46), RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 5.dp, vertical = 2.dp)
-                                ) {
-                                    Text(
+                            Spacer(modifier = Modifier.width(12.dp))
+                        }
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    contact?.name ?: "Mesh Chat",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 17.sp,
+                                    color = T.TextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (contact?.isIntroduced == true && !isMutuallyVerified) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    GhostBadge(
                                         text = "INTRODUCED",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color(0xFFA1A1AA),
-                                        letterSpacing = 0.5.sp
+                                        containerColor = T.Surface2,
+                                        contentColor = T.TextSecondary
                                     )
                                 }
                             }
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "#" + (contact?.id?.take(6) ?: ""),
-                                fontSize = 12.sp,
-                                color = T.TextSecondary,
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
+                            Spacer(modifier = Modifier.height(2.dp))
                             RadioProximityWave(
                                 rssi = matchedPeer?.rssi,
                                 isOnline = isOnline
@@ -574,31 +357,11 @@ fun ChatScreen(contactId: String, navController: NavController, application: App
 
             Box(modifier = Modifier.weight(1f)) {
                 if (messages.isEmpty()) {
-                    // Premium empty state
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(T.Surface0),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("💬", fontSize = 56.sp)
-                            Spacer(modifier = Modifier.height(T.SpaceMd))
-                            Text(
-                                "No messages yet",
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = T.TextSecondary
-                            )
-                            Spacer(modifier = Modifier.height(T.SpaceSm))
-                            Text(
-                                "Say hi to start the conversation 👋",
-                                fontSize = 14.sp,
-                                color = T.TextMuted,
-                                textAlign = TextAlign.Center
-                            )
-                        }
-                    }
+                    GhostEmptyState(
+                        icon = Icons.AutoMirrored.Filled.ArrowBack, // We can pass null or clean icon
+                        title = "Encrypted Mesh Channel",
+                        subtitle = "End-to-end encrypted with X25519 & Ed25519.\nDirect range delivery with DTN store-and-forward fallback."
+                    )
                 } else {
                     LazyColumn(
                         state = listState,
@@ -819,46 +582,9 @@ fun PremiumMessageBubble(
     val haptics = LocalHapticFeedback.current
     val isSent = message.isOutgoing
 
-    // Slide-in animation
-    val slideOffset = remember { Animatable(if (isSent) 40f else -40f) }
-    val alphaAnim = remember { Animatable(0f) }
-    LaunchedEffect(message.id) {
-        launch { slideOffset.animateTo(0f, tween(180, easing = FastOutSlowInEasing)) }
-        launch { alphaAnim.animateTo(1f, tween(180)) }
-    }
-
+    // Zero-overhead rendering: no per-bubble slide/fade animations or infinite transitions during scroll.
     val isSprayed = message.status == MessageEntity.STATUS_SPRAYED
     val isSurvival = T.isSurvivalHudEnabled
-
-    // Pulse animation for SPRAYED (disabled in Survival HUD mode to conserve battery)
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val pulseScale by if (!isSurvival && isSprayed) {
-        infiniteTransition.animateFloat(
-            initialValue = 1f,
-            targetValue = 1.25f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(750, easing = FastOutSlowInEasing),
-                repeatMode = RepeatMode.Reverse
-            ),
-            label = "pulseScale"
-        )
-    } else {
-        remember { mutableStateOf(1f) }
-    }
-
-    val shimmerAlpha by if (!isSurvival && isSprayed) {
-        infiniteTransition.animateFloat(
-            initialValue = 0.35f,
-            targetValue = 0.95f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(1200, easing = FastOutSlowInEasing),
-                repeatMode = RepeatMode.Reverse
-            ),
-            label = "shimmerAlpha"
-        )
-    } else {
-        remember { mutableStateOf(0.6f) }
-    }
 
     // Grouped bubble shape — tighter corners for middle messages
     val bubbleShape = getBubbleShape(isSent, groupPosition)
@@ -869,20 +595,10 @@ fun PremiumMessageBubble(
         else -> 1.dp
     }
 
-    // Delay-Tolerant Sprayed physics border: pulsing ethereal neon shimmer while in transit
+    // Delay-Tolerant Sprayed physics border: clean static amber/accent border without frame animations
     val bubbleBorder = when {
         isSprayed && isSurvival -> Modifier.border(1.dp, T.SurvivalAmber, bubbleShape)
-        isSprayed -> Modifier.border(
-            1.5.dp,
-            Brush.linearGradient(
-                listOf(
-                    T.NeonViolet1.copy(alpha = shimmerAlpha),
-                    T.NeonViolet2.copy(alpha = shimmerAlpha),
-                    T.NeonViolet3.copy(alpha = shimmerAlpha)
-                )
-            ),
-            bubbleShape
-        )
+        isSprayed -> Modifier.border(1.dp, T.Sprayed.copy(alpha = 0.5f), bubbleShape)
         isSent && message.status == MessageEntity.STATUS_DELIVERED -> Modifier.border(
             1.dp,
             T.Online.copy(alpha = 0.35f),
@@ -894,15 +610,13 @@ fun PremiumMessageBubble(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = topPad)
-            .offset(x = slideOffset.value.dp)
-            .graphicsLayer { alpha = alphaAnim.value },
+            .padding(top = topPad),
         horizontalAlignment = if (isSent) Alignment.End else Alignment.Start
     ) {
         Box {
             Surface(
                 shape = bubbleShape,
-                shadowElevation = if (isSent) 3.dp else 1.dp,
+                shadowElevation = if (isSent) 2.dp else 1.dp,
                 color = Color.Transparent,
                 modifier = Modifier.widthIn(max = T.BubbleMaxWidth)
             ) {
@@ -911,11 +625,7 @@ fun PremiumMessageBubble(
                         .then(bubbleBorder)
                         .then(
                             if (isSent) {
-                                Modifier.background(
-                                    brush = Brush.linearGradient(
-                                        colors = listOf(T.Purple, T.PurpleDark)
-                                    )
-                                )
+                                Modifier.background(brush = T.OutgoingBubbleBrush)
                             } else {
                                 Modifier.background(T.Surface2)
                             }
@@ -981,92 +691,30 @@ fun PremiumMessageBubble(
                             lineHeight = 20.sp
                         )
 
-                        // Timestamp + status — inline at bottom-right
+                        // Timestamp + authoritative status indicator
                         Row(
                             modifier = Modifier
                                 .align(Alignment.End)
                                 .padding(top = 2.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             Text(
                                 text = formatRelativeTime(message.timestamp),
                                 fontSize = 11.sp,
-                                color = if (isSent) Color.White.copy(alpha = 0.6f) else T.TextMuted
+                                color = if (isSent) Color.White.copy(alpha = 0.65f) else T.TextMuted
                             )
                             if (message.isOutgoing) {
-                                StatusIndicator(
+                                GhostStatusIndicator(
                                     status = message.status,
-                                    isSent = true,
-                                    pulseScale = pulseScale
+                                    onRetry = { onRetry(message) }
                                 )
                             }
                         }
                     }
                 }
             }
-            // Context menu replaced by bottom sheet (onLongPress)
         }
-    }
-}
-
-// ======================== Status Indicator ========================
-
-@Composable
-private fun StatusIndicator(status: Int, isSent: Boolean, pulseScale: Float) {
-    val T = GhostTheme
-    when (status) {
-        MessageEntity.STATUS_PENDING -> {
-            CircularProgressIndicator(
-                modifier = Modifier.size(10.dp),
-                strokeWidth = 1.dp,
-                color = Color.White.copy(alpha = 0.5f)
-            )
-        }
-        MessageEntity.STATUS_SENT -> {
-            SingleCheck(modifier = Modifier.size(13.dp))
-        }
-        MessageEntity.STATUS_DELIVERED -> {
-            DoubleCheck(modifier = Modifier.size(15.dp))
-        }
-        MessageEntity.STATUS_FAILED -> {
-            Text("!", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = T.Failed)
-        }
-        MessageEntity.STATUS_SPRAYED -> {
-            Text(
-                "📡",
-                modifier = Modifier.scale(pulseScale),
-                fontSize = 11.sp
-            )
-        }
-    }
-}
-
-@Composable
-private fun SingleCheck(modifier: Modifier = Modifier) {
-    Icon(
-        imageVector = Icons.Default.Check,
-        contentDescription = "Sent",
-        tint = GhostTheme.PurpleLight,
-        modifier = modifier
-    )
-}
-
-@Composable
-private fun DoubleCheck(modifier: Modifier = Modifier) {
-    Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        Icon(
-            imageVector = Icons.Default.Check,
-            contentDescription = "Delivered",
-            tint = GhostTheme.PurpleLight.copy(alpha = 0.65f),
-            modifier = Modifier.size(13.dp).offset(x = (-3).dp)
-        )
-        Icon(
-            imageVector = Icons.Default.Check,
-            contentDescription = "Delivered",
-            tint = GhostTheme.PurpleLight,
-            modifier = Modifier.size(13.dp).offset(x = 3.dp)
-        )
     }
 }
 

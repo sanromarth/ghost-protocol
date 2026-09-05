@@ -51,9 +51,10 @@ object AvatarGenerator {
 /**
  * GHOST Signature Avatar:
  * Features the "Ghost Aura" / Ethereal Ring:
- * - Mutually Verified: Surrounded by an ethereal rotating neon violet sweep gradient rim.
- * - In Survival HUD Mode: Crisp phosphor green outline, 0 animation / GPU draw calls to save battery.
- * - Unverified: Minimal dark slate outline.
+ * - Mutually Verified: High-contrast neon violet sweep gradient rim.
+ *   (Static in scrollable lists for 0-overhead smooth scrolling; animated only when animateEtherealRing=true)
+ * - In Survival HUD Mode: Crisp phosphor green outline, 0 GPU draw calls to save battery.
+ * - Unverified: Minimal dark slate outline (BorderUnverified).
  */
 @Composable
 fun GhostAvatar(
@@ -61,6 +62,7 @@ fun GhostAvatar(
     name: String,
     size: Dp = GhostTheme.AvatarMedium,
     isMutuallyVerified: Boolean = false,
+    animateEtherealRing: Boolean = false,
     onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -68,10 +70,10 @@ fun GhostAvatar(
     val avatar = remember(pubkey, name) { AvatarGenerator.fromPubkey(pubkey, name) }
     val isSurvival = T.isSurvivalHudEnabled
 
-    // Rotate the ethereal gradient ring continuously unless in battery-saving Survival HUD mode
-    val infiniteTransition = rememberInfiniteTransition(label = "ethereal_ring")
-    val rotationAngle by if (!isSurvival && isMutuallyVerified) {
-        infiniteTransition.animateFloat(
+    // Rotate ethereal ring only when explicitly requested and not in survival mode
+    val rotationAngle = if (!isSurvival && isMutuallyVerified && animateEtherealRing) {
+        val infiniteTransition = rememberInfiniteTransition(label = "ethereal_ring")
+        val angle by infiniteTransition.animateFloat(
             initialValue = 0f,
             targetValue = 360f,
             animationSpec = infiniteRepeatable(
@@ -80,8 +82,9 @@ fun GhostAvatar(
             ),
             label = "ethereal_spin"
         )
+        angle
     } else {
-        remember { mutableStateOf(0f) }
+        0f
     }
 
     val rimThickness = if (isMutuallyVerified) 2.5.dp else 1.dp
@@ -102,20 +105,12 @@ fun GhostAvatar(
                         .border(rimThickness, T.SurvivalPhosphor, CircleShape)
                 )
             } else {
-                // Animated Ethereal Neon Violet Ring
-                val etherealBrush = Brush.sweepGradient(
-                    colors = listOf(
-                        T.NeonViolet1,
-                        T.NeonViolet2,
-                        T.NeonViolet3,
-                        T.NeonViolet1
-                    )
-                )
+                // Ethereal Neon Violet Ring (uses hoisted static brush)
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .rotate(rotationAngle)
-                        .border(rimThickness, etherealBrush, CircleShape)
+                        .then(if (rotationAngle != 0f) Modifier.rotate(rotationAngle) else Modifier)
+                        .border(rimThickness, T.EtherealSweepBrush, CircleShape)
                 )
             }
         } else {
@@ -123,7 +118,7 @@ fun GhostAvatar(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .border(rimThickness, Color(0xFF3F3F46), CircleShape)
+                    .border(rimThickness, T.BorderUnverified, CircleShape)
             )
         }
 

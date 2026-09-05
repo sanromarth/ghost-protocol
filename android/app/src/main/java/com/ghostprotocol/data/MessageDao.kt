@@ -23,10 +23,11 @@ interface MessageDao {
     @Query("DELETE FROM messages WHERE id = :id")
     suspend fun deleteById(id: String)
 
-    @Query("UPDATE messages SET status = :status WHERE id = :id")
+    // Terminal status guard: STATUS_DELIVERED (2) cannot be downgraded by stale callbacks
+    @Query("UPDATE messages SET status = :status WHERE id = :id AND (status != 2 OR :status = 2)")
     suspend fun updateStatus(id: String, status: Int)
 
-    @Query("UPDATE messages SET status = :newStatus WHERE contactId = :contactId AND status IN (:oldStatuses)")
+    @Query("UPDATE messages SET status = :newStatus WHERE contactId = :contactId AND status IN (:oldStatuses) AND (status != 2 OR :newStatus = 2)")
     suspend fun updateStatusesForContact(contactId: String, oldStatuses: List<Int>, newStatus: Int)
 
     @Query("SELECT * FROM messages WHERE status = :status AND isOutgoing = 1")
@@ -38,6 +39,9 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE contentHash = :hash LIMIT 1")
     suspend fun getByContentHash(hash: String): MessageEntity?
 
-    @Query("UPDATE messages SET status = :status WHERE contentHash = :hash")
+    @Query("UPDATE messages SET status = :status WHERE contentHash = :hash AND (status != 2 OR :status = 2)")
     suspend fun updateStatusByHash(hash: String, status: Int)
+
+    @Query("SELECT * FROM messages ORDER BY timestamp DESC")
+    fun getAllMessages(): Flow<List<MessageEntity>>
 }

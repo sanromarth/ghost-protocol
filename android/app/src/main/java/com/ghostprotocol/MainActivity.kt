@@ -114,10 +114,10 @@ class MainActivity : ComponentActivity() {
                         NavHost(
                             navController = navController,
                             startDestination = "contacts",
-                            enterTransition = { slideInVertically(tween(250)) { it / 3 } + fadeIn(tween(250)) },
-                            exitTransition = { fadeOut(tween(150)) },
-                            popEnterTransition = { fadeIn(tween(200)) },
-                            popExitTransition = { slideOutVertically(tween(250)) { it / 3 } + fadeOut(tween(200)) }
+                            enterTransition = { slideInHorizontally(tween(220)) { it } + fadeIn(tween(220)) },
+                            exitTransition = { slideOutHorizontally(tween(220)) { -it / 4 } + fadeOut(tween(220)) },
+                            popEnterTransition = { slideInHorizontally(tween(220)) { -it / 4 } + fadeIn(tween(220)) },
+                            popExitTransition = { slideOutHorizontally(tween(220)) { it } + fadeOut(tween(220)) }
                         ) {
                             composable("contacts") { ContactListScreen(navController) }
                             composable("chat/{contactId}") { backStackEntry ->
@@ -195,7 +195,7 @@ class MainActivity : ComponentActivity() {
         } else {
             requiredPermissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-        requiredPermissions.add(Manifest.permission.CAMERA)
+        // CAMERA is requested lazily only when QR scanner screen is opened
         // Android 13+ requires runtime notification permission for foreground service
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             requiredPermissions.add(Manifest.permission.POST_NOTIFICATIONS)
@@ -220,7 +220,7 @@ class MainActivity : ComponentActivity() {
             startService(serviceIntent)
         }
 
-        // Request battery optimization exclusion so Android doesn't kill the service
+        // Request battery optimization exclusion once so Android doesn't kill the service
         requestBatteryOptimizationExclusion()
     }
 
@@ -228,7 +228,10 @@ class MainActivity : ComponentActivity() {
     private fun requestBatteryOptimizationExclusion() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
-            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            val prefs = getSharedPreferences("ghost_system_prefs", MODE_PRIVATE)
+            val alreadyPrompted = prefs.getBoolean("battery_opt_prompted", false)
+            if (!alreadyPrompted && !pm.isIgnoringBatteryOptimizations(packageName)) {
+                prefs.edit().putBoolean("battery_opt_prompted", true).apply()
                 val intent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                     data = android.net.Uri.parse("package:$packageName")
                 }

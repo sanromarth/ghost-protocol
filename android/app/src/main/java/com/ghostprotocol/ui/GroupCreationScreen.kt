@@ -20,10 +20,13 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.ghostprotocol.GhostService
 import com.ghostprotocol.IdentityManager
 import com.ghostprotocol.data.Contact
 import com.ghostprotocol.data.GhostDatabase
 import com.ghostprotocol.data.GroupEntity
+import com.ghostprotocol.data.GroupMessageEntity
+import com.ghostprotocol.group.GroupMessageSender
 import com.ghostprotocol.group.GroupProtocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -40,6 +43,15 @@ fun GroupCreationScreen(
     val scope = rememberCoroutineScope()
     val db = remember { GhostDatabase.getInstance(context) }
     val contacts by db.contactDao().getAll().collectAsState(initial = emptyList())
+
+    val sender = remember {
+        GhostService.activeGroupSender ?: GroupMessageSender(
+            groupDao = db.groupDao(),
+            contactDao = db.contactDao(),
+            groupMessageDao = db.groupMessageDao(),
+            routerProvider = { null }
+        )
+    }
 
     var groupName by remember { mutableStateOf("") }
     val selectedContactIds = remember { mutableStateListOf<String>() }
@@ -231,6 +243,17 @@ fun GroupCreationScreen(
 
                         withContext(Dispatchers.IO) {
                             db.groupDao().insert(group)
+
+                            val systemNotice = GroupMessageEntity(
+                                groupId = groupId,
+                                senderContactId = myContactId,
+                                text = "* You created cell group \"${group.name}\" *",
+                                timestamp = timestamp,
+                                status = GroupMessageEntity.STATUS_DELIVERED
+                            )
+                            db.groupMessageDao().insert(systemNotice)
+
+                            sender.sendGroupInvite(group)
                         }
 
                         onGroupCreated(groupId)

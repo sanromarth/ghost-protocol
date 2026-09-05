@@ -1,5 +1,7 @@
 # RFC 005: GHOST Identity Layer (Layer 5)
 
+**Author:** PEDDI SANKARA RAO
+
 ## 1. Purpose
 Decentralized identity management. No central authority. Identity recovery via Shamir's Secret Sharing with algorithmically selected guardians.
 

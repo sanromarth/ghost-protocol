@@ -1,30 +1,32 @@
 # GHOST Protocol — v0.3 Implementation Status
 
-> **Last updated:** 2026-09-04  
-> **Version:** v0.3.7  
-> **Build:** `app-debug.apk` (~46 MB)  
-> **Kotlin Tests:** Passing (`./gradlew testDebugUnitTest` in 7s)  
-> **Go Tests:** 15/15 passing (`go test -v ./...` in <0.05s)  
-> **Database:** Room schema version 9 (`GhostDatabase`)  
-> **Status:** ✅ Completed — Protest Mode Security Postures, Frictionless Discovery, Rotating BIP-39 Codes, Pairwise Cell Groups, One-Way Contact Introductions, and Cryptographic Delivery Receipts fully integrated.
+> **Last updated:** 2026-09-04
+> **Version:** v0.3.8
+> **Build:** `app-debug.apk` (~46 MB)
+> **Kotlin Tests:** Passing (`./gradlew test` in 42s, 50 actionable tasks)
+> **Go Tests:** 15/15 passing (`go test -v ./...` in <0.05s)
+> **Database:** Room schema version 9 (`GhostDatabase`)
+> **Status:** Complete — Postures, Discovery, BIP-39 Codes, Pairwise Cell Groups, Contact Introductions, Delivery Receipts, and Compose UI updates integrated.
 
 ---
 
-## 1. What v0.3.0 Through v0.3.7 Accomplished
+## 1. Scope and Implementation (v0.3.0 – v0.3.8)
 
-The v0.1 and v0.2 releases gave GHOST a solid foundation: delay-tolerant Spray-and-Wait routing in Go, X25519/Ed25519 cryptography in Rust, single-session GATT message batching, and dynamic battery policy management.
+The v0.1 and v0.2 releases established baseline protocol functions: delay-tolerant Spray-and-Wait routing in Go, X25519/Ed25519 cryptography in Rust, single-session GATT message batching, and dynamic battery policy management.
 
-However, real-world deployment in hostile or high-pressure environments revealed four critical gaps:
-1. **The In-Person QR Bottleneck:** In protests, disaster zones, or crowded spaces, requiring users to stand 10cm apart with steady phone cameras to scan 64-byte QR codes took 30+ seconds and frequently failed under movement, cracked screens, or poor lighting.
-2. **The Group Messaging Dilemma:** Existing mesh apps handle groups poorly. Bridgefy sends group messages via unencrypted cleartext broadcast; BitChat exposes persistent Nostr keys on public relays; Briar replicates forums unboundedly, exhausting phone storage.
-3. **The Transport ACK Blindspot:** A GATT write acknowledgment (`STATUS_SENT` / `✓`) only proves the local radio pushed bytes into the peer's Bluetooth stack. It does not prove the peer decrypted the payload, committed it to disk, or rendered it.
-4. **The Isolated Cell Problem:** Activists within the same operational unit could not introduce peers to one another without physical in-person QR scans.
+v0.3 addressed key functional and operational gaps:
+1. **Contact Exchange Latency:** Adding alternatives to manual QR code scanning in crowded or low-visibility scenarios.
+2. **Group Messaging:** Implementing pairwise encrypted group messaging without cleartext broadcast or unbounded replication.
+3. **End-to-End Delivery Verification:** Providing cryptographic delivery receipts beyond physical GATT write acknowledgments.
+4. **Peer Introductions:** Allowing established contacts to cryptographically vouch for third-party public keys.
+5. **UI Rendering Performance:** Decoupling cryptographic operations and database aggregation from the UI composition thread.
 
-The v0.3 releases addressed each of these directly:
-- **Protest Mode (v0.3.0):** 4 selectable security postures (`NORMAL`, `PROTEST`, `EMERGENCY`, `STEALTH`), one-tap nearby discovery handshakes (opcodes `0x10`/`0x11`), and 24-hour rotating BIP-39 short codes (opcodes `0x20`–`0x23`).
-- **Cell Groups (v0.3.5):** Private, verified group messaging for 2–8 members with pairwise E2E encryption per member envelope (opcode `0x30`), room schema v7, and zero Go/Rust changes.
-- **Contact Introductions / Trust Web (v0.3.6):** One-way cryptographic vouching (opcode `0x50`) allowing Alice to introduce Bob to Carol via signed encrypted envelopes. Visual distinction (`INTRODUCED` chip, slate border) preserves trust boundaries without granting the violet Ghost Aura until mutual QR verification. Room schema v9.
+Implemented features:
+- **Security Postures (v0.3.0):** 4 selectable operational modes (`NORMAL`, `PROTEST`, `EMERGENCY`, `STEALTH`), one-tap nearby discovery handshakes (opcodes `0x10`/`0x11`), and 24-hour rotating BIP-39 short codes (opcodes `0x20`–`0x23`).
+- **Cell Groups (v0.3.5):** Private group messaging for 2–8 members with pairwise E2E encryption per member envelope (opcode `0x30`), room schema v7.
+- **Contact Introductions / Trust Web (v0.3.6):** Cryptographic vouching (opcode `0x50`) allowing Alice to introduce Bob to Carol via signed encrypted envelopes. Visual distinction (`INTRODUCED` chip) preserves trust boundaries without granting verification until mutual QR verification. Room schema v9.
 - **Delivery Receipts (v0.3.7):** Cryptographic E2E delivery acknowledgments (opcode `0x40`) with double checkmarks (`✓✓`), deterministic content hash matching, and Room schema v8.
+- **Compose UI Performance (v0.3.8):** Extracted `ChatViewModel` with optimistic bubble acknowledgement, background multi-table aggregation via `ConversationRepository` on `Dispatchers.Default`, and standardized 48dp touch targets.
 
 ---
 
@@ -61,6 +63,9 @@ All radio traffic demuxes on byte 0 in Kotlin. Packets for discovery, short code
 0x30: Cell Group Individual Unicast Envelope
 [1B: 0x30] [32B: groupId] [16B: senderContactId] [8B: timestamp] [Ciphertext] [64B: signature]
 
+0x31: Cell Group Member Invite Envelope
+[1B: 0x31] [32B: groupId] [16B: creatorContactId] [8B: timestamp] [Ciphertext] [64B: signature]
+
 0x40: Cryptographic Delivery Receipt
 [1B: 0x40] [64B: msgHash hex] [16B: recipientContactId] [8B: timestamp] [64B: signature]
 
@@ -94,9 +99,12 @@ Governs the device's radio exposure and scanning aggressiveness:
 
 ### 3.4 Cell Groups (`com.ghostprotocol.group.*`)
 - Hard limit of 8 members per group (2–8).
-- **Pairwise Unicast Envelopes:** Instead of broadcasting cleartext or attempting virtual group routing through the Go engine, outgoing messages loop through members and encrypt separate envelopes using `GhostCrypto.encrypt(memberX25519Pub, wireText)`.
+- **Two-Tier Delivery Architecture:**
+  - **Tier 1 (Explicit Invite `0x31`):** Dispatched immediately upon group creation. Pairwise encrypted to each member's X25519 key, signed with creator's Ed25519 seed. Recipient phones verify creator authenticity, insert `GroupEntity` into Room DB, post a high-priority invite notification (`NotificationHelper.showGroupInviteNotification`), and log a system welcome message. The group appears immediately in their conversation list.
+  - **Tier 2 (Self-Healing `0x30` Message Payloads):** Every outgoing group message embeds a compact `META` group descriptor (`groupName`, `creatorContactId`, `memberContactIdsJson`) within the pairwise ciphertext. If an offline or out-of-range member misses the initial `0x31` invite, the receiver automatically extracts the `META` payload from the first received message, validates member identity, auto-creates the `GroupEntity`, posts the invite notification, logs the system notice, and saves the message.
+- **Pairwise Unicast Envelopes:** Outgoing messages loop through verified members and encrypt separate envelopes using `GhostCrypto.encrypt(memberX25519Pub, wirePayload)`. Fits within a single 512-byte ATT MTU write (<300 bytes).
 - **Destination:** Each envelope routes to `SHA-256(memberEd25519PubKey)`. In-range members receive direct GATT writes; out-of-range members are queued in Go BoltDB with $L=4$ Spray-and-Wait copies.
-- Recipient phones receive standard Go router `OnDeliver` events, demux `0x30`, verify the Ed25519 signature, decrypt the payload, and insert into `group_messages`.
+- Recipient phones receive Go router `OnDeliver` events or direct GATT writes, demux `0x30` / `0x31`, verify the Ed25519 signature, decrypt the payload, and insert into `group_messages`.
 
 ### 3.5 Delivery Receipts (`com.ghostprotocol.receipt.*`)
 - Opcode `0x40` wire protocol (153 bytes) sent when destination completes Room DB insertion.
@@ -110,7 +118,13 @@ Governs the device's radio exposure and scanning aggressiveness:
 - Cryptographic vouching: Alice signs Bob's Ed25519 and X25519 public keys, name, Carol's contact ID, and Alice's contact ID. Carol verifies the signature against Alice's pinned Ed25519 key.
 - Strict one-way trust invariant: Bob is not notified and does not receive Carol's keys. No bidirectional graph synchronization.
 - Visual distinction: Introduced contacts are marked with a slate avatar border (`#3F3F46`) and an `"INTRODUCED"` chip. They never receive the violet Ghost Aura until mutually verified via QR or Discovery.
-- Chat screen provides a persistent banner with tap-to-verify action for upgrading trust.
+### 3.7 Compose UI & Data Flow Architecture (v0.3.8)
+- **Optimistic Send ACK (<1ms):** Extracted `ChatViewModel` decouples user perception from disk and radio latencies. Tapping Send prepends an in-memory `PENDING` bubble instantly while crypto and database commits run on background coroutines.
+- **Off-Thread Multi-Table Aggregation (`ConversationRepository`):** Merges 1:1 contacts, Cell Groups, latest messages, and O(1) RF peer fingerprint matches entirely on `Dispatchers.Default`. The UI receives a single, chronologically sorted `StateFlow<List<ConversationItem>>`.
+- **Zero Scroll Overhead (60 FPS):** Completely removed on-the-fly Base64 decoding, SHA-256 fingerprint hashing, and Room queries from `LazyColumn` item renderers. Removed the 1-second polling ticker loop in `ContactListScreen.kt`.
+- **Hoisted Brushes & Static Rings:** Pre-allocates gradient brushes (`EtherealSweepBrush`, `SprayedBorder`, `OutgoingBubbleBrush`) in `GhostTheme.kt` and disables infinite rotation in list avatars, preventing recomposition churn and reducing UI frame render times to <16.6ms.
+- **Accessible Design System (`GhostComponents.kt`):** Standardized 48dp physical finger touch targets, clean `GhostStatusIndicator` (`•`, `✓`, `✓✓`, `!`, `∿`), metadata `GhostBadge` chips, confident `GhostEmptyState` screens, a single 56dp `GhostActionFab`, and a consolidated `NewChatBottomSheet`.
+- **Smooth Navigation & Lazy Permissions:** 220ms horizontal slide navigation transitions and lazy runtime requesting of the camera permission only when opening the QR scanner.
 
 ---
 
@@ -176,6 +190,6 @@ ALTER TABLE contacts ADD COLUMN isIntroduced INTEGER NOT NULL DEFAULT 0;
 
 | Test Suite | Command | Result | Notes |
 |---|---|---|---|
-| **Android Unit Tests** | `./gradlew testDebugUnitTest` | ✅ Passed (7s) | Covers Room DAOs, GroupProtocol, ReceiptProtocol, IntroductionProtocol, ShortCode HMAC, and signatures |
+| **Android Unit Tests** | `JAVA_HOME=/opt/android-studio/jbr ./gradlew test` | ✅ Passed (42s) | 50 actionable tasks (debug + release unit test suites pass completely) |
 | **Go Router Tests** | `cd go/ghostrouter && go test -v ./...` | ✅ Passed (15/15) | Covers BoltDB store, spray routing, batch serializer, and relay willingness gate |
-| **Debug APK Build** | `./gradlew assembleDebug` | ✅ Passed (5s) | Clean compilation on API 34 with dual ARM64/x86_64 native binaries |
+| **Debug APK Build** | `JAVA_HOME=/opt/android-studio/jbr ./gradlew assembleDebug` | ✅ Passed (9s) | Clean compilation on API 34; output: `app-debug.apk` (46 MB) |
